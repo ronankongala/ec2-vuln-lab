@@ -1,0 +1,64 @@
+id: CLD-02
+version: 1
+
+draft: true
+drafted_by: "manual"
+preview_required: true
+source_finding:
+  source: "securityhub"
+  control: "EC2.18"
+  finding_id: "EXAMPLE-not-a-real-finding"
+
+match:
+  source: scanner/cloud_checks.py
+  check: check_cld02
+  port: 22
+
+scope:
+  tags:
+    Project: ec2-vuln-lab
+  account: "145443243505"
+  allowed_actions:
+    - ec2:RevokeSecurityGroupIngress
+    - ec2:AuthorizeSecurityGroupIngress
+
+fix:
+  type: automated
+  description: >-
+    Revoke the tcp/22 ingress rule from 0.0.0.0/0 on vuln-lab-target-sg.
+    Session Manager access through the VPC endpoints is not affected.
+  steps:
+    - action: ec2:RevokeSecurityGroupIngress
+      target:
+        type: security_group
+        name: vuln-lab-target-sg
+      params:
+        IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+
+rollback:
+  description: Re-authorize tcp/22 from 0.0.0.0/0 with the original description and tags.
+  steps:
+    - action: ec2:AuthorizeSecurityGroupIngress
+      target:
+        type: security_group
+        name: vuln-lab-target-sg
+      params:
+        IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+        Description: "INTENTIONAL: ssh open to 0.0.0.0/0"
+        Tags:
+          Name: vuln-lab-target-ssh-open
+          Project: ec2-vuln-lab
+          Purpose: intentionally-vulnerable-lab
+
+verify:
+  check: check_cld02
+  expect: closed
+
+approved_by: pending
+approved_on: ""

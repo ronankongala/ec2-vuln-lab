@@ -4,7 +4,8 @@
 Loads remediations/rules/*.yaml and applies or rolls back one rule at a time
 against the sandbox account. Safety gates, all fail-closed:
 
-  * a rule whose approved_by is "pending" (or empty) is never run
+  * a rule whose approved_by is "pending", "ai" (or empty) is never run
+  * a rule with a draft key is never applied, even if approved_by is set
   * every step action must be listed in the rule's scope.allowed_actions
   * every target must be owned by account 145443243505 and carry the tag
     Project=ec2-vuln-lab (plus any extra tags in scope.tags)
@@ -19,9 +20,13 @@ reviewed), reads current state with describe/get calls only, and prints what
 each fix step would change. AWS clients are wrapped so any other call is
 refused. One audit entry is written per dry-run.
 
+Drafts (remediations/drafts/*.draft.yaml) are never loaded by rule ID. Pass a
+draft's file path to --dry-run to preview it; --apply refuses it.
+
 Usage:
     python remediations/engine.py --list
     python remediations/engine.py --dry-run CLD-01 [--profile sandbox-tf] [--region us-east-1]
+    python remediations/engine.py --dry-run remediations/drafts/CLD-02.draft.yaml
     python remediations/engine.py --apply CLD-01 [--profile sandbox-tf] [--region us-east-1]
     python remediations/engine.py --rollback CLD-01 [--profile sandbox-tf] [--region us-east-1]
 """
@@ -41,6 +46,9 @@ import yaml
 ENGINE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = ENGINE_DIR.parent
 RULES_DIR = ENGINE_DIR / "rules"
+DRAFTS_DIR = ENGINE_DIR / "drafts"
+DRAFT_SUFFIX = ".draft.yaml"
+DRAFT_MESSAGE = "This is a draft. Preview it, then approve it by moving it to remediations/rules."
 MANIFEST_PATH = PROJECT_ROOT / "vulns" / "manifest.yaml"
 AUDIT_LOG = PROJECT_ROOT / "results" / "remediation-log.jsonl"
 
@@ -77,23 +85,59 @@ def utc_now():
 # Rules
 # ---------------------------------------------------------------------------
 
+def _load_rule_file(path, expected_id):
+    with path.open(encoding="utf-8") as fh:
+        rule = yaml.safe_load(fh) or {}
+    missing = [k for k in REQUIRED_KEYS if k not in rule]
+    if missing:
+        raise RuleError(f"{path.name}: missing keys {', '.join(missing)}")
+    if rule["id"] != expected_id:
+        raise RuleError(f"{path.name}: id {rule['id']} does not match file name")
+    fix_type = rule["fix"].get("type")
+    if fix_type not in FIX_TYPES:
+        raise RuleError(f"{path.name}: fix.type must be one of {', '.join(FIX_TYPES)}")
+    if fix_type == "manual" and rule["fix"].get("steps"):
+        raise RuleError(f"{path.name}: manual rules must have empty fix.steps")
+    return rule
+
+
 def load_rules():
     rules = {}
     for path in sorted(RULES_DIR.glob("*.yaml")):
-        with path.open(encoding="utf-8") as fh:
-            rule = yaml.safe_load(fh) or {}
-        missing = [k for k in REQUIRED_KEYS if k not in rule]
-        if missing:
-            raise RuleError(f"{path.name}: missing keys {', '.join(missing)}")
-        if rule["id"] != path.stem:
-            raise RuleError(f"{path.name}: id {rule['id']} does not match file name")
-        fix_type = rule["fix"].get("type")
-        if fix_type not in FIX_TYPES:
-            raise RuleError(f"{path.name}: fix.type must be one of {', '.join(FIX_TYPES)}")
-        if fix_type == "manual" and rule["fix"].get("steps"):
-            raise RuleError(f"{path.name}: manual rules must have empty fix.steps")
+        rule = _load_rule_file(path, path.stem)
         rules[rule["id"]] = rule
     return rules
+
+
+def find_draft(arg):
+    """Return the draft file path if arg names a *.draft.yaml file, else None.
+
+    A bare file name is looked up in DRAFTS_DIR. Draft files outside
+    DRAFTS_DIR are rejected.
+    """
+    path = Path(arg)
+    if not path.name.endswith(DRAFT_SUFFIX):
+        return None
+    if path.parent == Path("."):
+        path = DRAFTS_DIR / path.name
+    path = path.resolve()
+    if path.parent != DRAFTS_DIR.resolve():
+        raise RuleError(f"{arg}: drafts are only read from {DRAFTS_DIR}")
+    if not path.is_file():
+        raise RuleError(f"{arg}: draft file not found")
+    return path
+
+
+def load_draft(path):
+    rule = _load_rule_file(path, path.name[: -len(DRAFT_SUFFIX)])
+    if rule.get("draft") is not True:
+        raise RuleError(f"{path.name}: files in {DRAFTS_DIR.name}/ must have draft: true")
+    return rule
+
+
+def is_draft(rule):
+    # Any draft key counts, so approval means removing the key, not setting it false.
+    return "draft" in rule
 
 
 def load_titles():
@@ -107,7 +151,7 @@ def load_titles():
 
 def is_pending(rule):
     approver = str(rule.get("approved_by") or "").strip().lower()
-    return approver in ("", "pending")
+    return approver in ("", "pending", "ai")
 
 
 # ---------------------------------------------------------------------------
@@ -607,6 +651,11 @@ def run_rule(rule, mode, profile, region):
     section = rule["fix"] if mode == "apply" else rule["rollback"]
     steps = section.get("steps") or []
 
+    if mode == "apply" and is_draft(rule):
+        print(f"{rule_id}: REFUSED: {DRAFT_MESSAGE}")
+        audit(rule, mode, "none", "refused", detail={"reason": "draft"})
+        return EXIT_REFUSED
+
     if is_pending(rule):
         print(f"{rule_id}: approval pending (approved_by={rule.get('approved_by')!r}). Skipping.")
         audit(rule, mode, "none", "skipped", detail={"reason": "approval pending"})
@@ -727,6 +776,9 @@ def run_dry_run(rule, profile, region, aws_factory=ReadOnlyAws):
         print(f"{rule_id}: approval pending (approved_by={rule.get('approved_by')!r}). "
               f"Dry-run continues; --apply would refuse this rule.")
 
+    if is_draft(rule):
+        print(f"{rule_id}: {DRAFT_MESSAGE} Dry-run continues; --apply would refuse this rule.")
+
     if not steps:
         print(f"{rule_id}: no fix steps defined. Nothing to do.")
         audit(rule, mode, "none", "noop", detail={"reason": "no steps"})
@@ -804,7 +856,8 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--list", action="store_true", help="show rules and their fix type")
     mode.add_argument("--dry-run", metavar="RULE_ID",
-                      help="show what a rule's fix steps would change, using read-only calls")
+                      help="show what a rule's fix steps would change, using read-only calls "
+                           "(RULE_ID may also be a remediations/drafts/*.draft.yaml path)")
     mode.add_argument("--apply", metavar="RULE_ID", help="run a rule's fix steps, then verify")
     mode.add_argument("--rollback", metavar="RULE_ID", help="run a rule's rollback steps")
     parser.add_argument("--profile", default="sandbox-tf", help="AWS profile (default: sandbox-tf)")
@@ -821,6 +874,20 @@ def main():
     if args.list:
         print_list(rules)
         return EXIT_OK
+
+    # Drafts are loaded only when named by file path, and only for --dry-run
+    # and --apply. --apply then refuses them in run_rule.
+    draft_arg = args.dry_run or args.apply
+    if draft_arg:
+        try:
+            draft_path = find_draft(draft_arg)
+            draft = load_draft(draft_path) if draft_path else None
+        except (RuleError, yaml.YAMLError) as exc:
+            sys.exit(f"Rule load error: {exc}")
+        if draft is not None:
+            if args.dry_run:
+                return run_dry_run(draft, args.profile, args.region)
+            return run_rule(draft, "apply", args.profile, args.region)
 
     if args.dry_run:
         rule_id = args.dry_run.upper()

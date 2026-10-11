@@ -119,7 +119,7 @@ class DryRunTests(unittest.TestCase):
             self.assertTrue(method.startswith(engine.READ_ONLY_PREFIXES), call)
 
     def test_pending_rule_plans_change(self):
-        rule = self.rules["CLD-01"]
+        rule = dict(self.rules["CLD-01"], approved_by="pending", approved_on="")
         self.assertTrue(engine.is_pending(rule))
         code, out = self._run(rule, responses())
         self.assertEqual(code, engine.EXIT_OK)
