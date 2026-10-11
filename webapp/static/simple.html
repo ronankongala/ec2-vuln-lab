@@ -275,7 +275,7 @@
   var SECRET_MARKERS = ["password", "secret", "token"];
   var LOAD_FAILED = "Could not load the latest results. Run a check first.";
   var PLAIN_MISSING = "Plain-language text is missing for this problem.";
-  var MANUAL_APPROVAL = "Needs a rebuild or design change. Left open on purpose.";
+  var MANUAL_APPROVAL = "Not applicable. Needs a rebuild or design change.";
   var FEED_PAGE = 25;
   var AUTO_MS = 30000;
 
@@ -373,8 +373,9 @@
     return t || "";
   }
   function approvalText(id, f, automated) {
+    if (!automated) return MANUAL_APPROVAL;
     var who = approverOf(id, f);
-    if (!who) return automated ? "Waiting for approval" : MANUAL_APPROVAL;
+    if (!who) return "Waiting for approval";
     var rule = state.rules[id];
     var on = rule ? plainDate(rule.approved_on) : "";
     return "Approved by " + who + (on ? " on " + on : "");
