@@ -1,5 +1,20 @@
 # ec2-vuln-lab
 
+## What this project is
+
+This is a practice lab for cloud security. It builds a computer on Amazon's cloud that is deliberately insecure, then shows how to find its problems and fix them automatically.
+
+Think of it like a crash-test dummy for security tools. The target has a list of known mistakes: its SSH door is open to the whole internet, its database has no password, and its settings let anyone become admin. Nothing on it holds real data, and it's locked away from the internet.
+
+The project does four things:
+
+1. Builds the broken computer from code, so it can be recreated anytime.
+2. Scans it and reports each mistake as open or closed.
+3. Fixes mistakes with approved rules. Every fix is previewed first, needs a person's approval, and is checked again afterward to confirm it worked.
+4. Keeps a record of every action in an audit log, shown on a web dashboard.
+
+By the end, 6 of the 9 cloud mistakes were fixed and verified. The other 3 need a rebuild or a design change, so they stay open on purpose.
+
 ## Pipeline
 
 The lab builds an intentionally vulnerable EC2 target, detects its weaknesses, remediates them through approved rules, verifies each fix independently, and records every action.
