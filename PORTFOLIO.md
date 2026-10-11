@@ -141,8 +141,8 @@ Screenshot 10 (Security Hub) is pending: the AWS Foundational Security Best Prac
 
 This deploys intentionally vulnerable infrastructure. Use a dedicated sandbox account only.
 
-1. Apply `terraform/01-guardrails-mgmt` with the management account profile (for example `mgmt-admin`).
-2. Apply `terraform/02-guardrails-sandbox` with the sandbox account profile (for example `sandbox-admin`).
+1. Apply `terraform/01-guardrails-mgmt` with the management account profile (for example `mgmt`).
+2. Apply `terraform/02-guardrails-sandbox` with the sandbox account profile (for example `sandbox`).
 3. Apply `terraform/03-vuln-instance` (default profile `sandbox-tf`).
 4. Run the scanner: `python scanner/cloud_checks.py --profile sandbox-tf`
 5. Dry-run a rule: `python remediations/engine.py --dry-run CLD-01`. Review it, set `approved_by` and `approved_on` in the rule file, then apply it: `python remediations/engine.py --apply CLD-01`
