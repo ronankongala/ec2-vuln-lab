@@ -125,6 +125,24 @@ Manual rules (CLD-05, CLD-07, CLD-08) have no button. They need a rebuild or a d
 
 Secrets: the dashboard and the server never display secret values. Lines containing password, secret, or token are removed from command output, and the user-data finding shows only the key name.
 
+## Simple dashboard
+
+A plain-language page at http://127.0.0.1:8000/simple, meant for reading. It shows the same nine problems as the detailed dashboard, with a plain explanation of each.
+
+The explanations, technical lines, and fix descriptions are read from vulns\manifest.yaml. A new finding added there appears on the page with no code change.
+
+What the buttons do:
+
+- See what would change previews a fix without changing anything.
+- Fix it appears only on an open problem that is automated and approved. It shows the preview first, then asks for confirmation.
+- Undo the fix reopens a fixed problem on purpose. It also asks first.
+
+Manual problems (CLD-05, CLD-07, CLD-08) have no buttons, because they need a rebuild or a design change.
+
+The activity list shows each preview, change, and check in plain sentences. The history shows the protection percentage over each run.
+
+Nothing changes unless you press a button and confirm.
+
 ## Rule approval
 
 Every rule file in remediations\rules has an approved_by field, and a new rule starts with approved_by: pending. The engine refuses to apply a pending rule. A rule is approved by a person who reads it and then sets approved_by and approved_on in its file. Dry-run still works on pending rules, so you can review a plan before approving it.
