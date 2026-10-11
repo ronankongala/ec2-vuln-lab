@@ -235,93 +235,6 @@
 
   var ORDER = ["CLD-01", "CLD-02", "CLD-03", "CLD-04", "CLD-05", "CLD-06", "CLD-07", "CLD-08", "CLD-09"];
 
-  var HOW = {
-    "CLD-01": "Instance metadata allows IMDSv1 (HttpTokens = optional), so requests without a session token are accepted.",
-    "CLD-02": "Security group vuln-lab-target-sg has an ingress rule for tcp/22 from 0.0.0.0/0.",
-    "CLD-03": "Security group vuln-lab-target-sg has an ingress rule for tcp/3306 (MySQL/MariaDB) from 0.0.0.0/0.",
-    "CLD-04": "Security group vuln-lab-target-sg has an ingress rule for tcp/6379 (Redis, no auth, protected mode off) from 0.0.0.0/0.",
-    "CLD-05": "Root EBS volume is unencrypted (Encrypted = False). Encryption cannot be turned on in place, so the volume must be recreated.",
-    "CLD-06": "IAM inline policy overly-permissive-s3 on the instance role grants s3:* on Resource *.",
-    "CLD-07": "The instance user data exports a database admin password as plain text. The value is not shown here.",
-    "CLD-08": "The VPC has no flow log, so no network traffic metadata is recorded to CloudWatch Logs or S3.",
-    "CLD-09": "Detailed monitoring is off (1-minute metrics disabled), so CloudWatch samples only every 5 minutes."
-  };
-
-  var PLAIN = {
-    "CLD-01": {
-      title: "Old, less safe way of reading server settings",
-      wrong: "The server accepts an older, less safe way of asking for its own settings.",
-      fixed: "Now requires the safer way.",
-      why: "Attackers can abuse the older method to steal the server's access keys.",
-      fix: "Changes a server setting so it only accepts the safer way of asking for its settings.",
-      topic: "server settings problem"
-    },
-    "CLD-02": {
-      title: "SSH login open to the internet",
-      wrong: "Anyone on the internet could try to log in over SSH.",
-      fixed: "Closed to the internet.",
-      why: "Login doors open to everyone are the first thing attackers try.",
-      fix: "Removes the network rule that let anyone on the internet reach SSH.",
-      topic: "SSH problem"
-    },
-    "CLD-03": {
-      title: "MySQL database open to the internet",
-      wrong: "Anyone on the internet could reach the MySQL database.",
-      fixed: "Closed to the internet.",
-      why: "Databases open to the internet can be read or broken into.",
-      fix: "Removes the network rule that let anyone on the internet reach MySQL.",
-      topic: "MySQL problem"
-    },
-    "CLD-04": {
-      title: "Redis data store open to the internet",
-      wrong: "Anyone on the internet could reach the Redis data store.",
-      fixed: "Closed to the internet.",
-      why: "Redis without a password lets anyone read or change its data.",
-      fix: "Removes the network rule that let anyone on the internet reach Redis.",
-      topic: "Redis problem"
-    },
-    "CLD-05": {
-      title: "Main disk not encrypted",
-      wrong: "The main disk is not encrypted.",
-      open: "Needs a rebuild to fix. Left open on purpose.",
-      why: "If the disk is copied, its data can be read.",
-      fix: "Rebuilds the server with an encrypted disk. This is done by hand, not from this page.",
-      topic: "disk problem"
-    },
-    "CLD-06": {
-      title: "Server allowed to do anything with storage",
-      wrong: "The server was allowed to do anything with storage.",
-      fixed: "Permission removed.",
-      why: "A broken server could then read or delete every stored file.",
-      fix: "Removes the permission that let the server do anything with storage.",
-      topic: "storage permission problem"
-    },
-    "CLD-07": {
-      title: "Password written in the startup script",
-      wrong: "A database password is written in plain text in the startup script.",
-      open: "Needs a design change to move it to a secret store. Left open on purpose.",
-      why: "Anyone who can read the startup script gets the password.",
-      fix: "Moves the password out of the startup script into a secret store. This is a design change done by hand.",
-      topic: "startup script problem"
-    },
-    "CLD-08": {
-      title: "Network traffic not recorded",
-      wrong: "Network traffic is not being recorded.",
-      open: "Needs a logging setup. Left open on purpose.",
-      why: "Without records, an attack leaves no trail to investigate.",
-      fix: "Turns on recording of network traffic. This needs a logging setup done by hand.",
-      topic: "network recording problem"
-    },
-    "CLD-09": {
-      title: "Detailed monitoring off",
-      wrong: "Detailed monitoring was off.",
-      fixed: "Turned on.",
-      why: "Slower monitoring means problems are spotted later.",
-      fix: "Turns on detailed monitoring for the server.",
-      topic: "monitoring problem"
-    }
-  };
-
   var ACTIONS = {
     "ec2:RevokeSecurityGroupIngress": "a network rule that let outsiders in was removed",
     "ec2:AuthorizeSecurityGroupIngress": "a network rule was added back, reopening the problem",
@@ -361,6 +274,8 @@
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   var SECRET_MARKERS = ["password", "secret", "token"];
   var LOAD_FAILED = "Could not load the latest results. Run a check first.";
+  var PLAIN_MISSING = "Plain-language text is missing for this problem.";
+  var MANUAL_APPROVAL = "Needs a rebuild or design change. Left open on purpose.";
   var FEED_PAGE = 25;
   var AUTO_MS = 30000;
 
@@ -457,18 +372,35 @@
     var t = rule && rule.fix && typeof rule.fix === "object" ? rule.fix.type : (f && f.fix_type);
     return t || "";
   }
-  function approvalText(id, f) {
+  function approvalText(id, f, automated) {
     var who = approverOf(id, f);
-    if (!who) return "Waiting for approval";
+    if (!who) return automated ? "Waiting for approval" : MANUAL_APPROVAL;
     var rule = state.rules[id];
     var on = rule ? plainDate(rule.approved_on) : "";
     return "Approved by " + who + (on ? " on " + on : "");
   }
-  function resultText(id, st, automated, approved) {
-    var p = PLAIN[id];
-    if (st === "closed") return { label: "Fixed: ", text: p.fixed || "Fixed." };
+  // Raw "plain" entry for a problem from /api/data, or null.
+  function plainEntry(id) {
+    var all = state.data && state.data.plain && typeof state.data.plain === "object" ? state.data.plain : null;
+    var p = all ? all[id] : null;
+    return p && typeof p === "object" ? p : null;
+  }
+  function hasText(v) { return typeof v === "string" && v.trim() !== ""; }
+  // The "plain" entry only when every field the card needs is present, otherwise null.
+  function plainFor(id, automated) {
+    var p = plainEntry(id);
+    if (!p) return null;
+    var need = ["plain_title", "plain_wrong", "technical", "plain_why", automated ? "plain_fix" : "plain_open"];
+    return need.every(function (k) { return hasText(p[k]); }) ? p : null;
+  }
+  function titleOf(id) {
+    var p = plainEntry(id);
+    return p && hasText(p.plain_title) ? p.plain_title : id;
+  }
+  function resultText(st, automated, approved, p) {
+    if (st === "closed") return { label: "Fixed: ", text: "The latest check found this closed." };
     if (st === "open") {
-      if (p.open) return { label: "Open: ", text: p.open };
+      if (hasText(p.plain_open)) return { label: "Open: ", text: p.plain_open };
       return { label: "Open: ", text: automated && approved ? "Not fixed right now. You can fix it with the button below." : "Not fixed yet." };
     }
     return { label: "", text: "Could not be checked this time." };
@@ -494,7 +426,10 @@
     if (r === "pending") return "A check afterwards could not run.";
     return "A check afterwards did not get the expected result.";
   }
-  function topicOf(id) { return PLAIN[id] ? " (" + PLAIN[id].topic + ")" : ""; }
+  function topicOf(id) {
+    var p = plainEntry(id);
+    return p && hasText(p.plain_title) ? " (" + p.plain_title.toLowerCase() + ")" : "";
+  }
 
   // Turn raw audit rows into feed items, joining an action with the check that followed it.
   function buildActivity() {
@@ -714,9 +649,10 @@
     });
   }
 
-  function searchText(id, st) {
-    var p = PLAIN[id];
-    return [p.title, p.wrong, p.fixed || "", p.open || "", p.why, p.fix, STATUS_LABEL[st]].join(" ").toLowerCase();
+  function searchText(id, st, p) {
+    if (!p) return [id, PLAIN_MISSING, STATUS_LABEL[st]].join(" ").toLowerCase();
+    return [p.plain_title, p.plain_wrong, p.technical, p.plain_why, p.plain_fix || "", p.plain_open || "", STATUS_LABEL[st]]
+      .join(" ").toLowerCase();
   }
 
   function renderProblems() {
@@ -729,11 +665,12 @@
     var shown = 0;
     ORDER.forEach(function (id) {
       var finding = byId[id] || null;
-      var st = statusOf(finding);
+      var p = plainFor(id, fixTypeOf(id, finding) === "automated");
+      var st = p ? statusOf(finding) : "error";
       if (f !== "all" && f !== st) return;
-      if (q && searchText(id, st).indexOf(q) === -1) return;
+      if (q && searchText(id, st, p).indexOf(q) === -1) return;
       shown++;
-      wrap.appendChild(problemCard(id, finding, st));
+      wrap.appendChild(p ? problemCard(id, finding, st, p) : missingCard(id, finding, st));
     });
     $("no-match").hidden = shown !== 0;
   }
@@ -745,33 +682,54 @@
     return p;
   }
 
-  function problemCard(id, finding, st) {
-    var p = PLAIN[id];
+  function showMoreToggle(card, id, finding, st) {
+    var toggle = el("button", "link", expanded[id] ? "Show less" : "Show more");
+    toggle.type = "button";
+    toggle.setAttribute("aria-expanded", expanded[id] ? "true" : "false");
+    toggle.addEventListener("click", function () {
+      expanded[id] = !expanded[id];
+      renderProblems();
+    });
+    card.appendChild(toggle);
+    if (expanded[id]) card.appendChild(moreSection(id, finding, st));
+  }
+
+  // Card for a problem whose plain-language text is missing or incomplete.
+  function missingCard(id, finding, st) {
+    var card = el("article", "problem " + st);
+    var head = el("div", "problem-head");
+    head.appendChild(el("h3", "", id));
+    head.appendChild(el("span", "badge " + st, STATUS_LABEL[st]));
+    card.appendChild(head);
+    card.appendChild(el("p", "result-line", PLAIN_MISSING));
+    showMoreToggle(card, id, finding, st);
+    return card;
+  }
+
+  function problemCard(id, finding, st, p) {
     var automated = fixTypeOf(id, finding) === "automated";
     var approved = !!approverOf(id, finding);
     var card = el("article", "problem " + st);
 
     var head = el("div", "problem-head");
-    head.appendChild(el("h3", "", p.title));
+    head.appendChild(el("h3", "", p.plain_title));
     head.appendChild(el("span", "badge " + st, STATUS_LABEL[st]));
     card.appendChild(head);
 
-    var res = resultText(id, st, automated, approved);
+    var res = resultText(st, automated, approved, p);
     var rp = el("p", "result-line");
     if (res.label) rp.appendChild(el("strong", "", res.label));
     rp.appendChild(document.createTextNode(res.text));
     card.appendChild(rp);
 
-    card.appendChild(field("What's wrong", p.wrong));
-    if (HOW[id]) {
-      var how = el("p", "field how");
-      how.appendChild(el("strong", "", "How it works (technical)"));
-      how.appendChild(el("code", "", HOW[id]));
-      card.appendChild(how);
-    }
-    card.appendChild(field("Why it matters", p.why));
-    card.appendChild(field("What the fix does", p.fix));
-    card.appendChild(field("Who approved the fix", approvalText(id, finding)));
+    card.appendChild(field("What's wrong", p.plain_wrong));
+    var how = el("p", "field how");
+    how.appendChild(el("strong", "", "How it works (technical)"));
+    how.appendChild(el("code", "", p.technical));
+    card.appendChild(how);
+    card.appendChild(field("Why it matters", p.plain_why));
+    if (automated) card.appendChild(field("What the fix does", p.plain_fix));
+    card.appendChild(field("Who approved the fix", approvalText(id, finding, automated)));
 
     if (!automated) {
       card.appendChild(el("p", "note", "This needs a rebuild or a design change. It is left open on purpose."));
@@ -798,15 +756,7 @@
 
     if (panels[id]) card.appendChild(renderPanel(id));
 
-    var toggle = el("button", "link", expanded[id] ? "Show less" : "Show more");
-    toggle.type = "button";
-    toggle.setAttribute("aria-expanded", expanded[id] ? "true" : "false");
-    toggle.addEventListener("click", function () {
-      expanded[id] = !expanded[id];
-      renderProblems();
-    });
-    card.appendChild(toggle);
-    if (expanded[id]) card.appendChild(moreSection(id, finding, st));
+    showMoreToggle(card, id, finding, st);
 
     card.querySelectorAll("button.act").forEach(function (b) { b.disabled = busy; });
     return card;
@@ -1018,7 +968,7 @@
     if (busy) return;
     panels[id] = { title: thenAskFix ? "Preview before fixing: nothing is changed yet" : "Preview: nothing will be changed", lines: [], raw: [], final: "Running the preview...", finalKind: "" };
     setBusy(true);
-    statusEl.textContent = "Running a preview for " + PLAIN[id].title.toLowerCase() + "...";
+    statusEl.textContent = "Running a preview for " + titleOf(id).toLowerCase() + "...";
     var r = await streamPost("/api/rules/" + id + "/dry-run/stream", function (line) { panelLine(id, line, "dry-run"); });
     var ok = r.result && r.result.ok;
     if (!r.result) panelFinal(id, refusalText(r), "bad");
@@ -1046,7 +996,7 @@
     var fixing = mode === "apply";
     panels[id] = { title: fixing ? "Fixing the problem" : "Undoing the fix", lines: [], raw: [], final: fixing ? "Fixing..." : "Undoing...", finalKind: "" };
     setBusy(true);
-    statusEl.textContent = (fixing ? "Fixing " : "Undoing the fix for ") + PLAIN[id].title.toLowerCase() + "...";
+    statusEl.textContent = (fixing ? "Fixing " : "Undoing the fix for ") + titleOf(id).toLowerCase() + "...";
     var r = await streamPost("/api/rules/" + id + "/" + mode + "/stream", function (line) { panelLine(id, line, mode); });
     var ok = r.result && r.result.ok;
     var msg;
