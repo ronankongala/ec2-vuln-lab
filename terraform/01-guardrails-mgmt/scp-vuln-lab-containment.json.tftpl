@@ -1,0 +1,74 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyRunInstancesWithPublicIp",
+      "Effect": "Deny",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:*:*:network-interface/*",
+      "Condition": {
+        "Bool": {
+          "ec2:AssociatePublicIpAddress": "true"
+        }
+      }
+    },
+    {
+      "Sid": "DenyInternetEgressPaths",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:CreateInternetGateway",
+        "ec2:AttachInternetGateway",
+        "ec2:CreateNatGateway",
+        "ec2:CreateEgressOnlyInternetGateway",
+        "ec2:AllocateAddress",
+        "ec2:AssociateAddress"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyPublicSnapshotAndImageSharing",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:ModifySnapshotAttribute",
+        "ec2:ModifyImageAttribute",
+        "ec2:ModifyFpgaImageAttribute",
+        "ec2:DisableSnapshotBlockPublicAccess",
+        "ec2:DisableImageBlockPublicAccess"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyCrossNetworkConnectivity",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:CreateVpcPeeringConnection",
+        "ec2:AcceptVpcPeeringConnection",
+        "ec2:CreateTransitGatewayVpcAttachment",
+        "ec2:AcceptTransitGatewayVpcAttachment",
+        "ec2:CreateVpnGateway",
+        "ec2:AttachVpnGateway",
+        "ec2:CreateClientVpnEndpoint",
+        "ec2:CreateCarrierGateway"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyOutsideAllowedRegion",
+      "Effect": "Deny",
+      "NotAction": [
+        "iam:*",
+        "organizations:*",
+        "sts:*",
+        "budgets:*",
+        "support:*",
+        "cloudfront:*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": "${allowed_region}"
+        }
+      }
+    }
+  ]
+}

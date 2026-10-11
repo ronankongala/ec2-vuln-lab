@@ -1,0 +1,56 @@
+id: CLD-04
+version: 1
+
+match:
+  source: scanner/cloud_checks.py
+  check: check_cld04
+  port: 6379
+
+scope:
+  tags:
+    Project: ec2-vuln-lab
+  account: "145443243505"
+  allowed_actions:
+    - ec2:RevokeSecurityGroupIngress
+    - ec2:AuthorizeSecurityGroupIngress
+
+fix:
+  type: automated
+  description: >-
+    Revoke the tcp/6379 (Redis) ingress rule from 0.0.0.0/0 on
+    vuln-lab-target-sg.
+  steps:
+    - action: ec2:RevokeSecurityGroupIngress
+      target:
+        type: security_group
+        name: vuln-lab-target-sg
+      params:
+        IpProtocol: tcp
+        FromPort: 6379
+        ToPort: 6379
+        CidrIp: 0.0.0.0/0
+
+rollback:
+  description: Re-authorize tcp/6379 from 0.0.0.0/0 with the original description and tags.
+  steps:
+    - action: ec2:AuthorizeSecurityGroupIngress
+      target:
+        type: security_group
+        name: vuln-lab-target-sg
+      params:
+        IpProtocol: tcp
+        FromPort: 6379
+        ToPort: 6379
+        CidrIp: 0.0.0.0/0
+        Description: "INTENTIONAL: redis open to 0.0.0.0/0"
+        Tags:
+          Name: vuln-lab-target-redis-open
+          Project: ec2-vuln-lab
+          Purpose: intentionally-vulnerable-lab
+
+verify:
+  check: check_cld04
+  expect: closed
+
+approved_by: ronan
+approved_on: "2026-10-12"

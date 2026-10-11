@@ -1,0 +1,43 @@
+id: CLD-09
+version: 1
+
+match:
+  source: scanner/cloud_checks.py
+  check: check_cld09
+
+scope:
+  tags:
+    Project: ec2-vuln-lab
+  account: "145443243505"
+  allowed_actions:
+    - ec2:MonitorInstances
+    - ec2:UnmonitorInstances
+
+fix:
+  type: automated
+  description: >-
+    Enable detailed (1-minute) CloudWatch monitoring on vuln-lab-target.
+    Detailed monitoring is billed per metric; for a single t3.micro the cost
+    is small but not zero.
+  steps:
+    - action: ec2:MonitorInstances
+      target:
+        type: instance
+        name: vuln-lab-target
+      params: {}
+
+rollback:
+  description: Disable detailed monitoring and return to basic 5-minute monitoring.
+  steps:
+    - action: ec2:UnmonitorInstances
+      target:
+        type: instance
+        name: vuln-lab-target
+      params: {}
+
+verify:
+  check: check_cld09
+  expect: closed
+
+approved_by: ronan
+approved_on: "2026-10-12"

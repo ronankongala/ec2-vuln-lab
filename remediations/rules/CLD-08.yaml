@@ -1,0 +1,43 @@
+id: CLD-08
+version: 1
+
+match:
+  source: scanner/cloud_checks.py
+  check: check_cld08
+
+scope:
+  tags:
+    Project: ec2-vuln-lab
+  account: "145443243505"
+  allowed_actions: []
+
+fix:
+  type: manual
+  description: >-
+    Manual change, because IAM is required. A VPC flow log that delivers to
+    CloudWatch Logs needs DeliverLogsPermissionArn, an IAM role trusted by
+    vpc-flow-logs.amazonaws.com with logs:CreateLogStream, logs:PutLogEvents,
+    logs:DescribeLogGroups and logs:DescribeLogStreams. No such role exists
+    in this project and this engine does not create IAM roles. Steps:
+    (1) create the CloudWatch log group /ec2-vuln-lab/vpc-flow-logs only if it
+    does not already exist, with a short retention such as 7 days and tag
+    Project=ec2-vuln-lab; (2) create the delivery role, tagged
+    Project=ec2-vuln-lab, scoped to that log group; (3) create the flow log on
+    vuln-lab-vpc with resource type VPC, traffic type ALL, log destination
+    type cloud-watch-logs, the log group above, and the delivery role. The
+    preferred home for all three is Terraform in
+    terraform/02-guardrails-sandbox, which owns the VPC.
+  steps: []
+
+rollback:
+  description: >-
+    Delete the flow log on vuln-lab-vpc. Delete the delivery role and the log
+    group only if they were created for this fix.
+  steps: []
+
+verify:
+  check: check_cld08
+  expect: closed
+
+approved_by: pending
+approved_on: ""

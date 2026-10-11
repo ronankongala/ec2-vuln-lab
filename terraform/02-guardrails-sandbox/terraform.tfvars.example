@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+sandbox_profile  = "sandbox-admin"
+region           = "us-east-1"
+budget_limit_usd = 25
+alert_email      = "you@example.com"
+
+# Optional: pin the AZ (e.g. if an endpoint service is unavailable in the default pick).
+# availability_zone = "us-east-1a"

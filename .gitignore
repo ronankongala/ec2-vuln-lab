@@ -1,0 +1,32 @@
+# Terraform working dirs and state
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+
+# Variable files may contain account IDs / emails; commit only *.tfvars.example
+*.tfvars
+*.tfvars.json
+
+# Saved plans
+*.tfplan
+tfplan
+
+# .terraform.lock.hcl is intentionally committed
+
+results/cloud-scan-latest.json
+results/history/
+results/remediation-log.jsonl
+
+# Generated scan results and remediation logs
+results/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Local environment and scratch files
+.env
+diff.txt

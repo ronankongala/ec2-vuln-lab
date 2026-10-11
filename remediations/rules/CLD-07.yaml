@@ -1,0 +1,40 @@
+id: CLD-07
+version: 1
+
+match:
+  source: scanner/cloud_checks.py
+  check: check_cld07
+
+scope:
+  tags:
+    Project: ec2-vuln-lab
+  account: "145443243505"
+  allowed_actions: []
+
+fix:
+  type: manual
+  description: >-
+    Manual change. Move DB_ADMIN_PASSWORD out of user data and into SSM
+    Parameter Store as a SecureString (for example /ec2-vuln-lab/db-admin-password),
+    grant vuln-lab-target-role ssm:GetParameter on that one parameter (plus
+    kms:Decrypt if a customer managed key is used), and have the bootstrap
+    read it at runtime with aws ssm get-parameter --with-decryption. Then
+    replace the user data: remove the export line from local.user_data in
+    terraform/03-vuln-instance/main.tf. user_data_replace_on_change is true,
+    so Terraform will replace the instance, and on-instance fixes must be
+    reapplied. Treat the old value as exposed and rotate it, since user data
+    stays readable to anyone with ec2:DescribeInstanceAttribute.
+  steps: []
+
+rollback:
+  description: >-
+    No automated rollback. Reverting means restoring the export line in
+    user data and rebuilding the instance.
+  steps: []
+
+verify:
+  check: check_cld07
+  expect: closed
+
+approved_by: pending
+approved_on: ""

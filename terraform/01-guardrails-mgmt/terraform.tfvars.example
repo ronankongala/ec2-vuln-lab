@@ -1,0 +1,4 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+mgmt_profile       = "mgmt-admin"
+sandbox_account_id = "111122223333"
+region             = "us-east-1"

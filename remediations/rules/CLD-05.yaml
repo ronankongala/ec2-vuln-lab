@@ -1,0 +1,42 @@
+id: CLD-05
+version: 1
+
+match:
+  source: scanner/cloud_checks.py
+  check: check_cld05
+
+scope:
+  tags:
+    Project: ec2-vuln-lab
+  account: "145443243505"
+  allowed_actions: []
+
+fix:
+  type: manual
+  description: >-
+    Rebuild required. An existing EBS volume cannot be encrypted in place, so
+    the root volume of vuln-lab-target needs to be replaced with a new
+    encrypted volume. In this project that means setting
+    root_block_device.encrypted = true in terraform/03-vuln-instance/main.tf
+    (optionally with a KMS key) and letting Terraform replace the instance.
+    Without Terraform the path is: stop the instance, snapshot the root
+    volume, copy the snapshot with encryption enabled, create a volume from
+    the encrypted copy, and swap it in as the root device. Consider enabling
+    account-level EBS encryption by default so future volumes are encrypted.
+    Any on-instance changes (OS and service fixes) are lost on a Terraform
+    rebuild and must be reapplied.
+  steps: []
+
+rollback:
+  description: >-
+    No automated rollback. Reverting means rebuilding again with
+    root_block_device.encrypted = false, which only reproduces the finding if
+    account-level EBS encryption by default is off.
+  steps: []
+
+verify:
+  check: check_cld05
+  expect: closed
+
+approved_by: pending
+approved_on: ""

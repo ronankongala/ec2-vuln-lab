@@ -1,0 +1,866 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ec2-vuln-lab dashboard</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0e1217; --panel: #161b22; --panel-2: #1c232c; --text: #e6e9ef; --muted: #9aa5b4;
+    --border: #2a323d; --accent: #5aa9f0; --accent-text: #0e1217; --grid: #262e38;
+    --code-bg: #0a0d11; --code-text: #d7dde8;
+    --closed: #4cc38a; --open: #f0b232; --error: #f26464;
+    --closed-tint: rgba(76, 195, 138, .14); --open-tint: rgba(240, 178, 50, .14); --error-tint: rgba(242, 100, 100, .14);
+    --critical: #ff5c7a; --high: #ff8a5b; --medium: #e8c35a; --low: #7ab0ff;
+    --critical-tint: rgba(255, 92, 122, .14); --high-tint: rgba(255, 138, 91, .14);
+    --medium-tint: rgba(232, 195, 90, .14); --low-tint: rgba(122, 176, 255, .14);
+    --banner-bg: #3a1a1d; --banner-text: #ffb4b4; --row-hover: #1f2731; --detail-bg: #12171d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; justify-content: space-between; padding: 16px 24px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { margin: 0; font-size: 18px; }
+  header .meta { color: var(--muted); font-size: 12px; }
+  .header-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  .check { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; cursor: pointer; }
+  main { max-width: 1280px; margin: 0 auto; padding: 16px 24px 48px; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  h2 { margin: 0 0 12px; font-size: 15px; }
+  h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--panel-2); }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .card .value { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 12px; }
+  .chart { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--panel-2); min-width: 0; }
+  .chart svg { display: block; width: 100%; height: auto; }
+  .chart .readout { color: var(--muted); font-size: 12px; min-height: 18px; font-variant-numeric: tabular-nums; }
+  .chart-axis { fill: var(--muted); font-size: 11px; }
+  .chart-value { fill: var(--text); font-size: 12px; font-weight: 600; }
+  .chart-grid { stroke: var(--grid); stroke-width: 1; }
+  .chart-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .chart-dot { fill: var(--accent); stroke: var(--panel-2); stroke-width: 2; }
+  .chart-dot.active { r: 6; }
+  .chart-hit { fill: transparent; cursor: default; }
+  .bar-critical { fill: var(--critical); } .bar-high { fill: var(--high); }
+  .bar-medium { fill: var(--medium); } .bar-low { fill: var(--low); }
+  .bar-other { fill: var(--muted); }
+  .bar-group:hover path { opacity: .85; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-bottom: 12px; }
+  .toolbar label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+  .toolbar .count { margin-left: auto; color: var(--muted); font-size: 12px; }
+  select, input[type="search"] { font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2); color: var(--text); }
+  input[type="search"] { min-width: 200px; }
+  select:focus, input:focus, button:focus-visible, tr.finding:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; white-space: nowrap; }
+  td.num { font-variant-numeric: tabular-nums; }
+  td.evidence { font-family: ui-monospace, Consolas, monospace; font-size: 12px; max-width: 360px; word-break: break-word; }
+  tr.finding { cursor: pointer; }
+  tr.finding:hover { background: var(--row-hover); }
+  tr.finding .chev { display: inline-block; width: 12px; color: var(--muted); transition: transform .15s; }
+  tr.finding[aria-expanded="true"] .chev { transform: rotate(90deg); }
+  tr.detail > td { background: var(--detail-bg); padding: 12px 16px 16px; }
+  .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+  .detail-grid p { margin: 0 0 8px; }
+  .detail-grid dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; font-size: 13px; }
+  .detail-grid dt { color: var(--muted); }
+  .detail-grid dd { margin: 0; word-break: break-word; }
+  .detail-grid pre { margin: 0; padding: 8px; background: var(--code-bg); color: var(--code-text); border-radius: 6px; font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+  .timeline { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 8px; }
+  .timeline span { width: 14px; height: 14px; border-radius: 3px; background: var(--grid); }
+  .timeline .t-closed { background: var(--closed); } .timeline .t-open { background: var(--open); } .timeline .t-error { background: var(--error); }
+  .run-list { max-height: 180px; overflow: auto; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .run-list div { display: flex; gap: 8px; align-items: center; padding: 1px 0; }
+  .pill { display: inline-block; padding: 0 8px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid transparent; }
+  .s-closed { color: var(--closed); background: var(--closed-tint); border-color: var(--closed); }
+  .s-open { color: var(--open); background: var(--open-tint); border-color: var(--open); }
+  .s-error { color: var(--error); background: var(--error-tint); border-color: var(--error); }
+  .v-critical { color: var(--critical); background: var(--critical-tint); border-color: var(--critical); }
+  .v-high { color: var(--high); background: var(--high-tint); border-color: var(--high); }
+  .v-medium { color: var(--medium); background: var(--medium-tint); border-color: var(--medium); }
+  .v-low { color: var(--low); background: var(--low-tint); border-color: var(--low); }
+  .s-none, .v-none { color: var(--muted); border-color: var(--border); }
+  .actions { white-space: nowrap; }
+  button { font: inherit; padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2); color: var(--text); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.loading:disabled { opacity: 1; border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+  button.primary:hover:not(:disabled) { color: var(--accent-text); filter: brightness(1.1); }
+  button.primary.loading:disabled { color: var(--accent-text); }
+  button.danger { border-color: var(--error); color: var(--error); }
+  .actions button + button { margin-left: 4px; }
+  .spinner { display: none; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; }
+  button.loading .spinner { display: inline-block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2s; } }
+  #output-panel pre { margin: 0; padding: 12px; background: var(--code-bg); color: var(--code-text); border: 1px solid var(--border); border-radius: 6px; max-height: 480px; overflow: auto; font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; }
+  #output-title { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  .banner { padding: 10px 12px; border-radius: 6px; background: var(--banner-bg); color: var(--banner-text); margin-bottom: 16px; display: none; }
+  .muted { color: var(--muted); }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 20px; width: min(760px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgba(0, 0, 0, .6); }
+  dialog h2 { font-size: 16px; }
+  dialog pre { margin: 8px 0 0; padding: 12px; background: var(--code-bg); color: var(--code-text); border: 1px solid var(--border); border-radius: 6px; max-height: 50vh; overflow: auto; font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; }
+  dialog .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  #confirm-status { font-size: 12px; margin-top: 8px; }
+  @media (max-width: 600px) {
+    header, main { padding-left: 16px; padding-right: 16px; }
+    input[type="search"] { min-width: 0; width: 100%; }
+    .toolbar .count { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>ec2-vuln-lab dashboard</h1>
+    <div class="meta" id="meta">Loading...</div>
+  </div>
+  <div class="header-controls">
+    <label class="check"><input type="checkbox" id="auto-refresh" autocomplete="off"> Auto-refresh every 30 seconds</label>
+    <button class="primary" id="scan-btn" data-key="scan" data-allowed="1"><span class="spinner" aria-hidden="true"></span><span>Run scan</span></button>
+  </div>
+</header>
+<main>
+  <div class="banner" id="banner"></div>
+
+  <section>
+    <h2>Summary</h2>
+    <div class="cards">
+      <div class="card"><div class="label">Closed</div><div class="value" id="sum-closed" style="color: var(--closed)">-</div></div>
+      <div class="card"><div class="label">Open</div><div class="value" id="sum-open" style="color: var(--open)">-</div></div>
+      <div class="card"><div class="label">Error</div><div class="value" id="sum-error" style="color: var(--error)">-</div></div>
+      <div class="card"><div class="label">Compliance</div><div class="value" id="sum-pct">-</div></div>
+    </div>
+    <div class="charts">
+      <figure class="chart" style="margin: 0">
+        <h3>Compliance across scan history</h3>
+        <div class="readout" id="compliance-readout">Hover a point for details.</div>
+        <div id="compliance-chart"></div>
+      </figure>
+      <figure class="chart" style="margin: 0">
+        <h3>Findings by severity</h3>
+        <div class="readout" id="severity-readout">Hover a bar for details.</div>
+        <div id="severity-chart"></div>
+      </figure>
+    </div>
+  </section>
+
+  <section>
+    <h2>Findings</h2>
+    <div class="toolbar">
+      <label>Status
+        <select id="f-status">
+          <option value="all">All</option><option value="open">Open</option>
+          <option value="closed">Closed</option><option value="error">Error</option>
+        </select>
+      </label>
+      <label>Severity
+        <select id="f-severity">
+          <option value="all">All</option><option value="critical">Critical</option><option value="high">High</option>
+          <option value="medium">Medium</option><option value="low">Low</option>
+        </select>
+      </label>
+      <label>Fix type
+        <select id="f-fix">
+          <option value="all">All</option><option value="automated">Automated</option><option value="manual">Manual</option>
+        </select>
+      </label>
+      <label>Search
+        <input type="search" id="f-search" placeholder="ID or title" autocomplete="off">
+      </label>
+      <span class="count" id="f-count"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Title</th><th>Severity</th><th>Status</th><th>Evidence</th><th>Fix type</th><th>Approved by</th><th>Actions</th></tr></thead>
+        <tbody id="findings-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="output-panel">
+    <h2>Output</h2>
+    <div id="output-title">Click a button to see its output here.</div>
+    <pre id="output">(no output yet)</pre>
+  </section>
+
+  <section>
+    <h2>Scan history</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Timestamp (UTC)</th><th>Run ID</th><th>Closed</th><th>Open</th><th>Error</th></tr></thead>
+        <tbody id="history-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Audit log (last 50, newest first)</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Timestamp</th><th>Rule</th><th>Mode</th><th>Action</th><th>Result</th></tr></thead>
+        <tbody id="audit-body"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<dialog id="confirm-dialog" aria-labelledby="confirm-title">
+  <h2 id="confirm-title"></h2>
+  <p id="confirm-message"></p>
+  <div class="muted" style="font-size: 12px">Dry-run preview:</div>
+  <pre id="confirm-preview"></pre>
+  <div id="confirm-status"></div>
+  <div class="dialog-actions">
+    <button type="button" id="confirm-cancel">Cancel</button>
+    <button type="button" class="danger" id="confirm-ok"></button>
+  </div>
+</dialog>
+
+<script>
+(function () {
+  "use strict";
+
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var SEVERITIES = ["critical", "high", "medium", "low"];
+  var AUTO_REFRESH_MS = 30000;
+
+  var state = {
+    busy: false,
+    activeKey: null,
+    findings: [],
+    historyRuns: [],
+    expanded: {},
+    rules: {}
+  };
+  var outputText = "";
+  var autoTimer = null;
+
+  function $(id) { return document.getElementById(id); }
+
+  function clear(el) { el.textContent = ""; }
+
+  function el(tag, text, cls) {
+    var node = document.createElement(tag);
+    if (text !== null && text !== undefined) node.textContent = String(text);
+    if (cls) node.className = cls;
+    return node;
+  }
+
+  function svg(tag, attrs, text) {
+    var node = document.createElementNS(SVG_NS, tag);
+    Object.keys(attrs || {}).forEach(function (k) { node.setAttribute(k, attrs[k]); });
+    if (text !== undefined) node.textContent = String(text);
+    return node;
+  }
+
+  function cell(text, cls) {
+    return el("td", text === null || text === undefined ? "" : text, cls);
+  }
+
+  function pill(text, prefix) {
+    var value = String(text || "").toLowerCase();
+    return el("span", text || "none", "pill " + prefix + (value || "none"));
+  }
+
+  function pillCell(text, prefix) {
+    var td = document.createElement("td");
+    td.appendChild(pill(text, prefix));
+    return td;
+  }
+
+  function emptyRow(tbody, cols, text) {
+    var tr = document.createElement("tr");
+    var td = cell(text, "muted");
+    td.colSpan = cols;
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+
+  function showBanner(text) {
+    var b = $("banner");
+    b.textContent = text || "";
+    b.style.display = text ? "block" : "none";
+  }
+
+  function shortTime(ts) {
+    var s = String(ts || "");
+    var m = s.match(/^\d{4}-(\d{2}-\d{2})T(\d{2}:\d{2})/);
+    return m ? m[1] + " " + m[2] : s;
+  }
+
+  /* ---------- output panel ---------- */
+
+  function startOutput(title) {
+    outputText = "";
+    $("output-title").textContent = title;
+    $("output").textContent = "";
+    $("output-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function setOutputTitle(title) { $("output-title").textContent = title; }
+
+  function appendOutput(text) {
+    var pre = $("output");
+    var atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
+    outputText += text + "\n";
+    pre.textContent = outputText;
+    if (atBottom) pre.scrollTop = pre.scrollHeight;
+  }
+
+  /* ---------- busy state and buttons ---------- */
+
+  function applyBusy() {
+    var buttons = document.querySelectorAll("button[data-key]");
+    for (var i = 0; i < buttons.length; i++) {
+      var b = buttons[i];
+      b.disabled = state.busy || b.dataset.allowed !== "1";
+      b.classList.toggle("loading", state.busy && b.dataset.key === state.activeKey);
+      b.setAttribute("aria-busy", b.classList.contains("loading") ? "true" : "false");
+    }
+  }
+
+  function setBusy(value, key) {
+    state.busy = value;
+    state.activeKey = value ? key : null;
+    applyBusy();
+  }
+
+  function canChange(f) {
+    return f.fix_type === "automated" && !!f.approved_by && f.approved_by !== "pending";
+  }
+
+  function actionButton(label, ruleId, mode, enabled) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.key = ruleId + ":" + mode;
+    btn.dataset.allowed = enabled ? "1" : "";
+    var spin = el("span", null, "spinner");
+    spin.setAttribute("aria-hidden", "true");
+    btn.appendChild(spin);
+    btn.appendChild(el("span", label));
+    btn.addEventListener("click", function () { runRule(ruleId, mode); });
+    return btn;
+  }
+
+  /* ---------- summary and charts ---------- */
+
+  function renderSummary(data) {
+    var s = data.summary || {};
+    $("sum-closed").textContent = s.closed;
+    $("sum-open").textContent = s.open;
+    $("sum-error").textContent = s.error;
+    $("sum-pct").textContent = (s.compliance_pct !== undefined ? s.compliance_pct : "-") + "%";
+    $("meta").textContent = "Account " + (data.account_id || "?") + ", region " + (data.region || "?") +
+      ", instance " + (data.instance_id || "?") + ". Data generated " + (data.generated_at_utc || "?") +
+      ". Refreshed " + new Date().toLocaleTimeString() + ".";
+  }
+
+  function compliancePct(h) {
+    var total = (h.closed || 0) + (h.open || 0) + (h.error || 0);
+    return total ? Math.round((h.closed || 0) / total * 1000) / 10 : 0;
+  }
+
+  function renderComplianceChart(history) {
+    var box = $("compliance-chart");
+    var readout = $("compliance-readout");
+    clear(box);
+    if (!history || !history.length) {
+      box.appendChild(el("div", "No scan history yet.", "muted"));
+      readout.textContent = "";
+      return;
+    }
+    var W = 560, H = 200, L = 40, R = 44, T = 12, B = 28;
+    var pw = W - L - R, ph = H - T - B;
+    var root = svg("svg", { viewBox: "0 0 " + W + " " + H, role: "img",
+      "aria-label": "Compliance percent for " + history.length + " scan runs" });
+    function y(p) { return T + ph - (p / 100) * ph; }
+    function x(i) { return history.length === 1 ? L + pw / 2 : L + (i / (history.length - 1)) * pw; }
+
+    [0, 25, 50, 75, 100].forEach(function (p) {
+      root.appendChild(svg("line", { x1: L, x2: L + pw, y1: y(p), y2: y(p), "class": "chart-grid" }));
+      root.appendChild(svg("text", { x: L - 6, y: y(p) + 4, "text-anchor": "end", "class": "chart-axis" }, p + "%"));
+    });
+    root.appendChild(svg("text", { x: x(0), y: H - 8, "text-anchor": history.length === 1 ? "middle" : "start", "class": "chart-axis" },
+      shortTime(history[0].timestamp_utc)));
+    if (history.length > 1) {
+      root.appendChild(svg("text", { x: x(history.length - 1), y: H - 8, "text-anchor": "end", "class": "chart-axis" },
+        shortTime(history[history.length - 1].timestamp_utc)));
+    }
+
+    var pts = history.map(function (h, i) { return x(i) + "," + y(compliancePct(h)); });
+    if (history.length > 1) root.appendChild(svg("polyline", { points: pts.join(" "), "class": "chart-line" }));
+
+    var dots = [];
+    history.forEach(function (h, i) {
+      dots.push(root.appendChild(svg("circle", { cx: x(i), cy: y(compliancePct(h)), r: 4, "class": "chart-dot" })));
+    });
+
+    var last = history[history.length - 1];
+    root.appendChild(svg("text", { x: x(history.length - 1) + 8, y: y(compliancePct(last)) + 4, "class": "chart-value" },
+      compliancePct(last) + "%"));
+
+    var defaultText = history.length + " runs. Latest " + compliancePct(last) + "% at " + (last.timestamp_utc || "?") + ".";
+    readout.textContent = defaultText;
+
+    // Hit columns wider than the dots, one per run.
+    var step = history.length > 1 ? pw / (history.length - 1) : pw;
+    history.forEach(function (h, i) {
+      var hit = svg("rect", { x: x(i) - step / 2, y: T, width: step, height: ph, "class": "chart-hit" });
+      var label = (h.timestamp_utc || "?") + ": " + compliancePct(h) + "% (" +
+        (h.closed || 0) + " closed, " + (h.open || 0) + " open, " + (h.error || 0) + " error)";
+      hit.appendChild(svg("title", {}, label));
+      hit.addEventListener("mouseenter", function () { dots[i].classList.add("active"); readout.textContent = label; });
+      hit.addEventListener("mouseleave", function () { dots[i].classList.remove("active"); readout.textContent = defaultText; });
+      root.appendChild(hit);
+    });
+    box.appendChild(root);
+  }
+
+  function barPath(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h);
+    return "M" + x + "," + (y + h) + " V" + (y + r) + " Q" + x + "," + y + " " + (x + r) + "," + y +
+      " H" + (x + w - r) + " Q" + (x + w) + "," + y + " " + (x + w) + "," + (y + r) + " V" + (y + h) + " Z";
+  }
+
+  function renderSeverityChart(findings) {
+    var box = $("severity-chart");
+    var readout = $("severity-readout");
+    clear(box);
+    var counts = {}, openCounts = {};
+    SEVERITIES.forEach(function (s) { counts[s] = 0; openCounts[s] = 0; });
+    (findings || []).forEach(function (f) {
+      var s = String(f.severity || "").toLowerCase();
+      if (counts[s] === undefined) return;
+      counts[s] += 1;
+      if (f.status === "open") openCounts[s] += 1;
+    });
+    var max = Math.max.apply(null, SEVERITIES.map(function (s) { return counts[s]; }).concat([1]));
+    var W = 360, H = 200, T = 22, B = 28, L = 8, R = 8;
+    var ph = H - T - B, slot = (W - L - R) / SEVERITIES.length, bw = Math.min(56, slot - 16);
+    var root = svg("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "Count of findings by severity" });
+    root.appendChild(svg("line", { x1: L, x2: W - R, y1: T + ph, y2: T + ph, "class": "chart-grid" }));
+    var defaultText = (findings || []).length + " findings in the latest scan.";
+    readout.textContent = defaultText;
+
+    SEVERITIES.forEach(function (s, i) {
+      var c = counts[s];
+      var h = c ? Math.max(2, (c / max) * ph) : 0;
+      var bx = L + i * slot + (slot - bw) / 2, by = T + ph - h;
+      var g = svg("g", { "class": "bar-group" });
+      var label = s + ": " + c + " finding" + (c === 1 ? "" : "s") + " (" + openCounts[s] + " open)";
+      if (h) g.appendChild(svg("path", { d: barPath(bx, by, bw, h, 4), "class": "bar-" + s }));
+      g.appendChild(svg("text", { x: bx + bw / 2, y: by - 6, "text-anchor": "middle", "class": "chart-value" }, c));
+      g.appendChild(svg("text", { x: bx + bw / 2, y: H - 8, "text-anchor": "middle", "class": "chart-axis" }, s));
+      var hit = svg("rect", { x: L + i * slot, y: 0, width: slot, height: H, "class": "chart-hit" });
+      hit.appendChild(svg("title", {}, label));
+      hit.addEventListener("mouseenter", function () { readout.textContent = label; });
+      hit.addEventListener("mouseleave", function () { readout.textContent = defaultText; });
+      g.appendChild(hit);
+      root.appendChild(g);
+    });
+    box.appendChild(root);
+  }
+
+  /* ---------- findings table, filters, details ---------- */
+
+  function currentFilters() {
+    return {
+      status: $("f-status").value,
+      severity: $("f-severity").value,
+      fix: $("f-fix").value,
+      q: $("f-search").value.trim().toLowerCase()
+    };
+  }
+
+  function matches(f, flt) {
+    if (flt.status !== "all" && f.status !== flt.status) return false;
+    if (flt.severity !== "all" && String(f.severity || "").toLowerCase() !== flt.severity) return false;
+    if (flt.fix !== "all" && f.fix_type !== flt.fix) return false;
+    if (flt.q) {
+      var hay = (String(f.id || "") + " " + String(f.title || "")).toLowerCase();
+      if (hay.indexOf(flt.q) === -1) return false;
+    }
+    return true;
+  }
+
+  function fetchRule(id) {
+    state.rules[id] = { status: "loading" };
+    fetch("/api/rules/" + encodeURIComponent(id), { cache: "no-store" })
+      .then(function (resp) {
+        return resp.json().catch(function () { return {}; }).then(function (body) {
+          state.rules[id] = resp.ok ? { status: "ok", rule: body }
+            : { status: "error", message: body.detail || ("HTTP " + resp.status) };
+        });
+      })
+      .catch(function (err) { state.rules[id] = { status: "error", message: String(err) }; })
+      .then(renderFindings);
+  }
+
+  function dlRow(dl, label, value) {
+    if (value === null || value === undefined || value === "") return;
+    dl.appendChild(el("dt", label));
+    dl.appendChild(el("dd", value));
+  }
+
+  function ruleBlock(f) {
+    var div = document.createElement("div");
+    div.appendChild(el("h3", "Rule"));
+    var entry = state.rules[f.id];
+    if (!entry) { fetchRule(f.id); entry = state.rules[f.id]; }
+    if (entry.status === "loading") { div.appendChild(el("p", "Loading rule...", "muted")); return div; }
+    if (entry.status === "error") { div.appendChild(el("p", entry.message, "muted")); return div; }
+    var rule = entry.rule || {};
+    var fix = rule.fix && typeof rule.fix === "object" ? rule.fix : {};
+    var rollback = rule.rollback && typeof rule.rollback === "object" ? rule.rollback : {};
+    div.appendChild(el("p", fix.description || "(description not shown: removed by the secret filter or not set)",
+      fix.description ? null : "muted"));
+    var dl = document.createElement("dl");
+    dlRow(dl, "Fix type", fix.type);
+    dlRow(dl, "Rollback", rollback.description);
+    var scope = rule.scope && typeof rule.scope === "object" ? rule.scope : {};
+    if (Array.isArray(scope.allowed_actions)) dlRow(dl, "Allowed actions", scope.allowed_actions.join(", "));
+    dlRow(dl, "Version", rule.version);
+    dlRow(dl, "Approved by", rule.approved_by);
+    dlRow(dl, "Approved on", rule.approved_on);
+    div.appendChild(dl);
+    return div;
+  }
+
+  function evidenceBlock(f) {
+    var div = document.createElement("div");
+    div.appendChild(el("h3", "Evidence"));
+    div.appendChild(el("pre", f.evidence || "(none)"));
+    return div;
+  }
+
+  function historyBlock(f) {
+    var div = document.createElement("div");
+    div.appendChild(el("h3", "Status across history runs"));
+    var runs = state.historyRuns.filter(function (r) { return r.statuses && r.statuses[f.id] !== undefined; });
+    if (!runs.length) { div.appendChild(el("p", "Not present in any history run.", "muted")); return div; }
+    var counts = { closed: 0, open: 0, error: 0 };
+    var strip = el("div", null, "timeline");
+    runs.forEach(function (r) {
+      var st = String(r.statuses[f.id] || "");
+      if (counts[st] !== undefined) counts[st] += 1;
+      var sq = el("span", null, "t-" + st);
+      sq.title = (r.timestamp_utc || "?") + ": " + (st || "unknown");
+      strip.appendChild(sq);
+    });
+    div.appendChild(strip);
+    div.appendChild(el("p", runs.length + " runs: " + counts.closed + " closed, " + counts.open + " open, " +
+      counts.error + " error. Oldest on the left.", "muted"));
+    var list = el("div", null, "run-list");
+    runs.slice().reverse().forEach(function (r) {
+      var row = document.createElement("div");
+      row.appendChild(el("span", r.timestamp_utc || "?", "muted"));
+      row.appendChild(pill(r.statuses[f.id], "s-"));
+      list.appendChild(row);
+    });
+    div.appendChild(list);
+    return div;
+  }
+
+  function detailRow(f) {
+    var tr = el("tr", null, "detail");
+    var td = document.createElement("td");
+    td.colSpan = 8;
+    var grid = el("div", null, "detail-grid");
+    grid.appendChild(ruleBlock(f));
+    grid.appendChild(evidenceBlock(f));
+    grid.appendChild(historyBlock(f));
+    td.appendChild(grid);
+    tr.appendChild(td);
+    return tr;
+  }
+
+  function toggleRow(id) {
+    if (state.expanded[id]) delete state.expanded[id]; else state.expanded[id] = true;
+    renderFindings();
+  }
+
+  function renderFindings() {
+    var tbody = $("findings-body");
+    clear(tbody);
+    var all = state.findings || [];
+    var flt = currentFilters();
+    var shown = all.filter(function (f) { return matches(f, flt); });
+    $("f-count").textContent = "Showing " + shown.length + " of " + all.length;
+    if (!all.length) { emptyRow(tbody, 8, "No findings."); applyBusy(); return; }
+    if (!shown.length) { emptyRow(tbody, 8, "No findings match the filters."); applyBusy(); return; }
+    shown.forEach(function (f) {
+      var open = !!state.expanded[f.id];
+      var tr = el("tr", null, "finding");
+      tr.tabIndex = 0;
+      tr.setAttribute("aria-expanded", open ? "true" : "false");
+      var idCell = document.createElement("td");
+      idCell.style.whiteSpace = "nowrap";
+      idCell.appendChild(el("span", ">", "chev"));
+      idCell.appendChild(document.createTextNode(" " + (f.id || "")));
+      tr.appendChild(idCell);
+      tr.appendChild(cell(f.title));
+      tr.appendChild(pillCell(f.severity, "v-"));
+      tr.appendChild(pillCell(f.status, "s-"));
+      tr.appendChild(cell(f.evidence, "evidence"));
+      tr.appendChild(cell(f.fix_type || "none"));
+      tr.appendChild(cell(f.approved_by || "pending"));
+      var td = el("td", null, "actions");
+      var automated = f.fix_type === "automated";
+      td.appendChild(actionButton("Dry-run", f.id, "dry-run", automated));
+      td.appendChild(actionButton("Apply", f.id, "apply", canChange(f)));
+      td.appendChild(actionButton("Rollback", f.id, "rollback", canChange(f)));
+      tr.appendChild(td);
+      tr.addEventListener("click", function (e) {
+        if (e.target.closest("button")) return;
+        toggleRow(f.id);
+      });
+      tr.addEventListener("keydown", function (e) {
+        if (e.target !== tr) return;
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleRow(f.id); }
+      });
+      tbody.appendChild(tr);
+      if (open) tbody.appendChild(detailRow(f));
+    });
+    applyBusy();
+  }
+
+  ["f-status", "f-severity", "f-fix"].forEach(function (id) { $(id).addEventListener("change", renderFindings); });
+  $("f-search").addEventListener("input", renderFindings);
+
+  /* ---------- history and audit tables ---------- */
+
+  function renderHistory(history) {
+    var tbody = $("history-body");
+    clear(tbody);
+    if (!history || !history.length) { emptyRow(tbody, 5, "No scan history."); return; }
+    history.slice().reverse().forEach(function (h) {
+      var tr = document.createElement("tr");
+      tr.appendChild(cell(h.timestamp_utc));
+      tr.appendChild(cell(h.run_id, "muted"));
+      tr.appendChild(cell(h.closed, "num"));
+      tr.appendChild(cell(h.open, "num"));
+      tr.appendChild(cell(h.error, "num"));
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderAudit(audit) {
+    var tbody = $("audit-body");
+    clear(tbody);
+    if (!audit || !audit.length) { emptyRow(tbody, 5, "No audit entries."); return; }
+    audit.slice(-50).reverse().forEach(function (a) {
+      var tr = document.createElement("tr");
+      tr.appendChild(cell(a.timestamp));
+      tr.appendChild(cell(a.rule_id));
+      tr.appendChild(cell(a.mode));
+      tr.appendChild(cell(a.action));
+      tr.appendChild(cell(a.result));
+      tbody.appendChild(tr);
+    });
+  }
+
+  /* ---------- data loading ---------- */
+
+  function getJson(url) {
+    return fetch(url, { cache: "no-store" }).then(function (resp) {
+      return resp.json().catch(function () { return {}; }).then(function (body) { return { ok: resp.ok, body: body }; });
+    });
+  }
+
+  function loadData() {
+    var historyReq = getJson("/api/history/findings").catch(function () { return { ok: false, body: {} }; });
+    return Promise.all([getJson("/api/data"), historyReq])
+      .then(function (results) {
+        var r = results[0], hr = results[1];
+        if (hr.ok && Array.isArray(hr.body.runs)) state.historyRuns = hr.body.runs;
+        if (!r.ok) {
+          showBanner(r.body.detail || "Could not load dashboard data.");
+          $("meta").textContent = "No data.";
+          return;
+        }
+        showBanner("");
+        state.findings = r.body.findings || [];
+        renderSummary(r.body);
+        renderComplianceChart(r.body.history);
+        renderSeverityChart(state.findings);
+        renderFindings();
+        renderHistory(r.body.history);
+        renderAudit(r.body.audit);
+      })
+      .catch(function (err) { showBanner("Could not load dashboard data: " + err); });
+  }
+
+  /* ---------- actions ---------- */
+
+  function formatTail(body) {
+    var parts = [];
+    if (body.detail) parts.push(String(body.detail));
+    if (body.summary && body.summary.length) parts.push("Summary:\n" + body.summary.join("\n"));
+    if (body.exit_code !== undefined) parts.push("Exit code: " + body.exit_code);
+    if (body.rebuild) parts.push("Dashboard rebuild (exit " + body.rebuild.exit_code + "):\n" + (body.rebuild.output || ""));
+    return parts.join("\n\n");
+  }
+
+  function formatResult(body) {
+    var parts = [];
+    if (body.output !== undefined) parts.push(body.output || "(no output)");
+    var tail = formatTail(body);
+    if (tail) parts.push(tail);
+    return parts.join("\n\n");
+  }
+
+  function errorDetail(resp) {
+    return resp.json().catch(function () { return {}; }).then(function (body) {
+      return String(body.detail || ("HTTP " + resp.status));
+    });
+  }
+
+  // POST to a /stream endpoint and append each output line as it arrives.
+  function streamAction(key, title, url) {
+    setBusy(true, key);
+    startOutput(title + " (running...)");
+    var result = null;
+
+    function handle(line) {
+      if (!line.trim()) return;
+      var msg;
+      try { msg = JSON.parse(line); } catch (e) { appendOutput(line); return; }
+      if (msg.type === "line") appendOutput(String(msg.text));
+      else if (msg.type === "result") result = msg.result || {};
+    }
+
+    return fetch(url, { method: "POST" })
+      .then(function (resp) {
+        if (!resp.ok) {
+          return errorDetail(resp).then(function (detail) {
+            setOutputTitle(title + " (HTTP " + resp.status + ")");
+            appendOutput(detail);
+            result = undefined;
+          });
+        }
+        if (!resp.body || !resp.body.getReader) {
+          return resp.text().then(function (text) { text.split("\n").forEach(handle); });
+        }
+        var reader = resp.body.getReader();
+        var decoder = new TextDecoder();
+        var buf = "";
+        function pump() {
+          return reader.read().then(function (chunk) {
+            if (chunk.done) { buf += decoder.decode(); if (buf) handle(buf); return; }
+            buf += decoder.decode(chunk.value, { stream: true });
+            var lines = buf.split("\n");
+            buf = lines.pop();
+            lines.forEach(handle);
+            return pump();
+          });
+        }
+        return pump();
+      })
+      .then(function () {
+        if (result === undefined) return;
+        if (result === null) { setOutputTitle(title + " (stream ended without a result)"); return; }
+        var tail = formatTail(result);
+        if (tail) appendOutput("\n" + tail);
+        setOutputTitle(title + " (" + (result.ok === false ? "finished with errors" : "done") + ")");
+      })
+      .catch(function (err) {
+        setOutputTitle(title + " (failed)");
+        appendOutput("Request failed: " + err);
+      })
+      .then(function () { setBusy(false); return loadData(); });
+  }
+
+  function confirmWithPreview(ruleId, mode, preview, previewOk) {
+    var dlg = $("confirm-dialog");
+    var verb = mode === "apply" ? "Apply" : "Roll back";
+    $("confirm-title").textContent = verb + " " + ruleId + "?";
+    $("confirm-message").textContent = "This will " + (mode === "apply" ? "APPLY the fix for " : "ROLL BACK the fix for ") +
+      ruleId + " against the sandbox AWS account. Review the dry-run output below first.";
+    $("confirm-preview").textContent = preview;
+    var ok = $("confirm-ok");
+    ok.textContent = verb + " " + ruleId;
+    ok.disabled = !previewOk;
+    var status = $("confirm-status");
+    status.textContent = previewOk ? "" : "The dry-run did not succeed, so this action is blocked. Fix the problem and try again.";
+    status.style.color = previewOk ? "" : "var(--error)";
+
+    return new Promise(function (resolve) {
+      function done(answer) {
+        ok.removeEventListener("click", onOk);
+        $("confirm-cancel").removeEventListener("click", onCancel);
+        dlg.removeEventListener("cancel", onCancel);
+        if (dlg.open) dlg.close();
+        resolve(answer);
+      }
+      function onOk() { done(true); }
+      function onCancel(e) { if (e) e.preventDefault(); done(false); }
+      ok.addEventListener("click", onOk);
+      $("confirm-cancel").addEventListener("click", onCancel);
+      dlg.addEventListener("cancel", onCancel);
+      dlg.showModal();
+      $("confirm-cancel").focus();
+    });
+  }
+
+  function runRule(ruleId, mode) {
+    if (state.busy) return;
+    var key = ruleId + ":" + mode;
+    var base = "/api/rules/" + encodeURIComponent(ruleId) + "/";
+    var title = ruleId + " " + mode;
+    if (mode === "dry-run") { streamAction(key, title, base + "dry-run/stream"); return; }
+
+    setBusy(true, key);
+    startOutput(title + " preview (running dry-run...)");
+    fetch(base + "dry-run", { method: "POST" })
+      .then(function (resp) {
+        return resp.json().catch(function () { return { detail: "Non-JSON response" }; }).then(function (body) {
+          var ok = resp.ok && body.ok !== false;
+          var text = formatResult(body) || "(no output)";
+          if (!resp.ok) text = "HTTP " + resp.status + "\n" + text;
+          return { ok: ok, text: text };
+        });
+      })
+      .catch(function (err) { return { ok: false, text: "Dry-run request failed: " + err }; })
+      .then(function (preview) {
+        appendOutput(preview.text);
+        setOutputTitle(title + " preview (" + (preview.ok ? "done" : "failed") + ")");
+        return confirmWithPreview(ruleId, mode, preview.text, preview.ok);
+      })
+      .then(function (confirmed) {
+        if (confirmed) {
+          state.busy = false;
+          return streamAction(key, title, base + mode + "/stream");
+        }
+        appendOutput("\n" + title + " cancelled. Nothing was changed.");
+        setOutputTitle(title + " (cancelled)");
+        setBusy(false);
+        return loadData();
+      });
+  }
+
+  $("scan-btn").addEventListener("click", function () {
+    if (!state.busy) streamAction("scan", "Scan", "/api/scan/stream");
+  });
+
+  $("auto-refresh").addEventListener("change", function (e) {
+    if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+    if (e.target.checked) {
+      autoTimer = setInterval(function () {
+        if (!state.busy && !$("confirm-dialog").open) loadData();
+      }, AUTO_REFRESH_MS);
+    }
+  });
+
+  $("auto-refresh").checked = false;
+  loadData();
+})();
+</script>
+</body>
+</html>

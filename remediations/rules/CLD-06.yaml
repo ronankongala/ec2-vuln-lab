@@ -1,0 +1,53 @@
+id: CLD-06
+version: 1
+
+match:
+  source: scanner/cloud_checks.py
+  check: check_cld06
+
+scope:
+  tags:
+    Project: ec2-vuln-lab
+  account: "145443243505"
+  allowed_actions:
+    - iam:DeleteRolePolicy
+    - iam:PutRolePolicy
+
+fix:
+  type: automated
+  description: >-
+    Delete the overly-permissive-s3 inline policy from vuln-lab-target-role.
+    The AmazonSSMManagedInstanceCore attachment is left in place, so Session
+    Manager keeps working. dnf repo access via the S3 gateway endpoint does
+    not depend on this policy.
+  steps:
+    - action: iam:DeleteRolePolicy
+      target:
+        type: iam_role
+        name: vuln-lab-target-role
+      params:
+        PolicyName: overly-permissive-s3
+
+rollback:
+  description: Re-create the overly-permissive-s3 inline policy allowing s3:* on *.
+  steps:
+    - action: iam:PutRolePolicy
+      target:
+        type: iam_role
+        name: vuln-lab-target-role
+      params:
+        PolicyName: overly-permissive-s3
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: IntentionalCLD06
+              Effect: Allow
+              Action: "s3:*"
+              Resource: "*"
+
+verify:
+  check: check_cld06
+  expect: closed
+
+approved_by: ronan
+approved_on: "2026-10-12"

@@ -1,0 +1,45 @@
+id: CLD-01
+version: 1
+
+match:
+  source: scanner/cloud_checks.py
+  check: check_cld01
+
+scope:
+  tags:
+    Project: ec2-vuln-lab
+  account: "145443243505"
+  allowed_actions:
+    - ec2:ModifyInstanceMetadataOptions
+
+fix:
+  type: automated
+  description: >-
+    Require IMDSv2 on vuln-lab-target by setting the instance metadata option
+    HttpTokens to "required". The metadata endpoint stays enabled.
+  steps:
+    - action: ec2:ModifyInstanceMetadataOptions
+      target:
+        type: instance
+        name: vuln-lab-target
+      params:
+        HttpTokens: required
+        HttpEndpoint: enabled
+
+rollback:
+  description: Set HttpTokens back to "optional" so IMDSv1 is allowed again.
+  steps:
+    - action: ec2:ModifyInstanceMetadataOptions
+      target:
+        type: instance
+        name: vuln-lab-target
+      params:
+        HttpTokens: optional
+        HttpEndpoint: enabled
+
+verify:
+  check: check_cld01
+  expect: closed
+
+approved_by: ronan
+approved_on: "2026-10-12"

@@ -1,0 +1,188 @@
+- id: CLD-01
+  layer: cloud
+  title: IMDSv1 allowed on instance metadata
+  severity: high
+  resource: aws_instance.target metadata_options
+  how_to_detect: EC2 console > instance > Details shows IMDSv2 "Optional"
+  how_to_fix: Set http_tokens to "required" and re-run terraform apply
+  cis_or_nist: NIST SP 800-53 Rev 5 CM-6
+
+- id: CLD-02
+  layer: cloud
+  title: Security group allows SSH (22) from 0.0.0.0/0
+  severity: high
+  resource: vuln-lab-target-sg ingress
+  how_to_detect: Security group inbound rules show 0.0.0.0/0 on tcp 22
+  how_to_fix: Remove the 0.0.0.0/0 SSH rule, or restrict it to a management CIDR
+  cis_or_nist: NIST SP 800-53 Rev 5 SC-7
+
+- id: CLD-03
+  layer: cloud
+  title: Security group allows MySQL/MariaDB (3306) from 0.0.0.0/0
+  severity: critical
+  resource: vuln-lab-target-sg ingress
+  how_to_detect: Security group inbound rules show 0.0.0.0/0 on tcp 3306
+  how_to_fix: Remove the ingress rule and allow database access only from the application security group
+  cis_or_nist: NIST SP 800-53 Rev 5 SC-7
+
+- id: CLD-04
+  layer: cloud
+  title: Security group allows Redis (6379) from 0.0.0.0/0
+  severity: critical
+  resource: vuln-lab-target-sg ingress
+  how_to_detect: Security group inbound rules show 0.0.0.0/0 on tcp 6379
+  how_to_fix: Remove the ingress rule and allow Redis only from the application security group
+  cis_or_nist: NIST SP 800-53 Rev 5 SC-7
+
+- id: CLD-05
+  layer: cloud
+  title: Root EBS volume not encrypted
+  severity: medium
+  resource: aws_instance.target root_block_device
+  how_to_detect: EC2 > Volumes shows Encrypted = No for the root volume
+  how_to_fix: Enable account-level EBS encryption by default and recreate the volume encrypted
+  cis_or_nist: NIST SP 800-53 Rev 5 SC-28
+
+- id: CLD-06
+  layer: cloud
+  title: Instance role grants s3:* on all resources
+  severity: critical
+  resource: overly-permissive-s3 inline policy on vuln-lab-target-role
+  how_to_detect: IAM > Roles > vuln-lab-target-role shows inline policy allowing s3:* on *
+  how_to_fix: Replace with a least-privilege policy scoped to the specific bucket and actions needed
+  cis_or_nist: NIST SP 800-53 Rev 5 AC-6
+
+- id: CLD-07
+  layer: cloud
+  title: Hardcoded secret in EC2 user data
+  severity: high
+  resource: aws_instance.target user_data
+  how_to_detect: EC2 > instance > Actions > Monitor and troubleshoot > Get instance user data shows DB_ADMIN_PASSWORD
+  how_to_fix: Move the secret to Secrets Manager or SSM Parameter Store and remove it from user data
+  cis_or_nist: NIST SP 800-53 Rev 5 IA-5
+
+- id: CLD-08
+  layer: cloud
+  title: VPC flow logs disabled
+  severity: medium
+  resource: vuln-lab-vpc (no flow log)
+  how_to_detect: VPC > vuln-lab-vpc > Flow logs tab is empty
+  how_to_fix: Create a flow log to CloudWatch Logs or S3 capturing all traffic
+  cis_or_nist: NIST SP 800-53 Rev 5 AU-12
+
+- id: CLD-09
+  layer: cloud
+  title: Detailed monitoring disabled
+  severity: low
+  resource: aws_instance.target monitoring
+  how_to_detect: EC2 > instance > Monitoring tab shows Detailed monitoring Disabled
+  how_to_fix: Enable detailed monitoring on the instance
+  cis_or_nist: NIST SP 800-53 Rev 5 SI-4
+
+- id: OS-01
+  layer: os
+  title: SSH password authentication enabled
+  severity: high
+  resource: /etc/ssh/sshd_config.d/10-vuln-lab.conf
+  how_to_detect: sudo sshd -T | grep passwordauthentication returns yes
+  how_to_fix: Set PasswordAuthentication no and restart sshd
+  cis_or_nist: NIST SP 800-53 Rev 5 IA-2
+
+- id: OS-02
+  layer: os
+  title: SSH root login permitted
+  severity: high
+  resource: /etc/ssh/sshd_config.d/10-vuln-lab.conf
+  how_to_detect: sudo sshd -T | grep permitrootlogin returns yes
+  how_to_fix: Set PermitRootLogin no and restart sshd
+  cis_or_nist: NIST SP 800-53 Rev 5 AC-6
+
+- id: OS-03
+  layer: os
+  title: Local account with weak password
+  severity: critical
+  resource: user labadmin
+  how_to_detect: labadmin logs in with password Password123!
+  how_to_fix: Lock or delete the account, or set a strong password and enforce pwquality
+  cis_or_nist: NIST SP 800-53 Rev 5 IA-5
+
+- id: OS-04
+  layer: os
+  title: Passwordless sudo for labadmin
+  severity: high
+  resource: /etc/sudoers.d/labadmin
+  how_to_detect: "sudo -l as labadmin shows (ALL) NOPASSWD: ALL"  
+  how_to_fix: Delete /etc/sudoers.d/labadmin or remove NOPASSWD
+  cis_or_nist: NIST SP 800-53 Rev 5 AC-6
+
+- id: OS-05
+  layer: os
+  title: SUID bit set on non-standard binary
+  severity: high
+  resource: /usr/local/bin/find-suid
+  how_to_detect: find / -perm -4000 -type f lists /usr/local/bin/find-suid
+  how_to_fix: Remove the SUID bit with chmod u-s, or delete the binary
+  cis_or_nist: NIST SP 800-53 Rev 5 CM-7
+
+- id: OS-06
+  layer: os
+  title: World-writable script executed by cron
+  severity: high
+  resource: /etc/cron.hourly/lab-cleanup
+  how_to_detect: ls -l /etc/cron.hourly/lab-cleanup shows mode 0777
+  how_to_fix: chmod 0755 and chown root:root the script
+  cis_or_nist: NIST SP 800-53 Rev 5 AC-3
+
+- id: OS-07
+  layer: os
+  title: /etc/shadow readable by all users
+  severity: critical
+  resource: /etc/shadow
+  how_to_detect: stat -c %a /etc/shadow returns 644
+  how_to_fix: chmod 0000 /etc/shadow, or 0400 owned by root
+  cis_or_nist: NIST SP 800-53 Rev 5 AC-3
+
+- id: OS-08
+  layer: os
+  title: auditd stopped and disabled
+  severity: high
+  resource: auditd service
+  how_to_detect: systemctl is-enabled auditd returns disabled
+  how_to_fix: systemctl enable --now auditd and confirm audit rules are loaded
+  cis_or_nist: NIST SP 800-53 Rev 5 AU-2
+
+- id: OS-09
+  layer: os
+  title: No host firewall active
+  severity: medium
+  resource: firewalld service
+  how_to_detect: systemctl is-active firewalld returns inactive
+  how_to_fix: Install and enable firewalld with a default-deny inbound zone
+  cis_or_nist: NIST SP 800-53 Rev 5 SC-7
+
+- id: OS-10
+  layer: os
+  title: Outdated packages with known CVEs
+  severity: high
+  resource: curl-minimal 7.88.1, libcurl-minimal 7.88.1, sudo 1.9.13 (pinned via dnf versionlock). openssl deliberately excluded.
+  how_to_detect: dnf versionlock list shows the pinned old versions; Amazon Inspector reports CVEs on them
+  how_to_fix: dnf versionlock delete, then dnf upgrade curl-minimal libcurl-minimal sudo
+  cis_or_nist: NIST SP 800-53 Rev 5 SI-2
+
+- id: SVC-01
+  layer: service
+  title: MariaDB bound to all interfaces with empty root password
+  severity: critical
+  resource: mariadb105-server on 0.0.0.0:3306
+  how_to_detect: ss -tlnp shows 0.0.0.0:3306, and mysql -u root with no password succeeds
+  how_to_fix: Bind to 127.0.0.1, set a root password, and run mysql_secure_installation
+  cis_or_nist: NIST SP 800-53 Rev 5 IA-5
+
+- id: SVC-02
+  layer: service
+  title: Redis bound to all interfaces with protected mode off and no auth
+  severity: critical
+  resource: redis6 on 0.0.0.0:6379
+  how_to_detect: ss -tlnp shows 0.0.0.0:6379, and redis-cli PING returns PONG without AUTH
+  how_to_fix: Set bind 127.0.0.1, protected-mode yes, and requirepass
+  cis_or_nist: NIST SP 800-53 Rev 5 AC-3
