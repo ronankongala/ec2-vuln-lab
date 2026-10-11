@@ -1,0 +1,1129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lab Status</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #111317; --fg: #eef0f3; --muted: #b4bac4; --line: #2e333c; --card: #1a1d23; --card2: #22262d;
+    --fixed: #4cc38a; --open: #f0b232; --error: #f26464; --accent: #7cb4ff; --on-status: #111317;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 18px; line-height: 1.5;
+    overflow-wrap: break-word; overflow-x: hidden;
+  }
+  main { max-width: 1200px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.2rem; font-weight: 600; color: var(--muted); margin: 0 0 12px; }
+  h2 { font-size: 1.3rem; margin: 0 0 12px; }
+  h3 { font-size: 1.15rem; margin: 0; line-height: 1.35; }
+  h4 { font-size: 1rem; margin: 0 0 8px; }
+  p { margin: 0 0 8px; }
+  section { margin: 0 0 32px; }
+  .muted { color: var(--muted); }
+  .safety {
+    border: 2px solid var(--accent); border-radius: 12px; background: var(--card);
+    padding: 12px 16px; margin: 0 0 20px; font-weight: 600;
+  }
+  button, select, input {
+    font: inherit; font-size: 1rem; color: var(--fg);
+  }
+  button {
+    font-weight: 600; padding: 10px 16px; border-radius: 10px;
+    border: 2px solid var(--fg); background: var(--bg); cursor: pointer;
+  }
+  button.primary { background: var(--fg); color: var(--bg); }
+  button.danger { border-color: var(--error); color: var(--error); }
+  button.danger.solid { background: var(--error); color: var(--on-status); }
+  button.fix.solid { background: var(--fixed); border-color: var(--fixed); color: var(--on-status); }
+  button.link { border: none; background: none; padding: 4px 0; color: var(--accent); text-decoration: underline; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible {
+    outline: 3px solid var(--accent); outline-offset: 2px;
+  }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 0 0 8px; }
+  .controls label { display: flex; gap: 8px; align-items: center; }
+  .controls input[type="search"], .controls select {
+    background: var(--card); border: 2px solid var(--line); border-radius: 10px; padding: 9px 12px;
+  }
+  .controls input[type="search"] { flex: 1 1 240px; min-width: 0; }
+  .controls input[type="checkbox"] { width: 20px; height: 20px; }
+  #status { min-height: 1.5em; color: var(--muted); margin: 0 0 20px; }
+
+  #headline { font-size: 1.45rem; font-weight: 600; line-height: 1.35; margin: 0 0 12px; }
+  .progress { height: 18px; background: var(--card2); border-radius: 9px; overflow: hidden; border: 1px solid var(--line); }
+  .progress > div { height: 100%; width: 0; background: var(--fixed); transition: width .3s; }
+  .progress-label { margin: 6px 0 16px; color: var(--muted); }
+  .counts { display: grid; grid-template-columns: 1fr; gap: 12px; margin: 0 0 12px; }
+  @media (min-width: 600px) { .counts { grid-template-columns: repeat(3, 1fr); } }
+  .count {
+    text-align: left; width: 100%; background: var(--card); border: 2px solid var(--line);
+    border-left-width: 8px; border-radius: 12px; padding: 12px 16px; color: var(--fg);
+  }
+  .count .num { display: block; font-size: 1.8rem; line-height: 1.2; }
+  .count .lbl { display: block; font-weight: 600; }
+  .count .hint { display: block; font-weight: 400; color: var(--muted); }
+  .count.closed { border-left-color: var(--fixed); }
+  .count.open { border-left-color: var(--open); }
+  .count.error { border-left-color: var(--error); }
+  .count[aria-pressed="true"] { border-color: var(--accent); background: var(--card2); }
+
+  .grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
+  @media (min-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } }
+  .grid > * { min-width: 0; }
+
+  .problem {
+    background: var(--card); border: 1px solid var(--line); border-left: 8px solid var(--line);
+    border-radius: 12px; padding: 16px;
+  }
+  .problem.closed { border-left-color: var(--fixed); }
+  .problem.open { border-left-color: var(--open); }
+  .problem.error { border-left-color: var(--error); }
+  .problem-head { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; margin: 0 0 8px; }
+  .badge {
+    flex: 0 0 auto; font-weight: 700; font-size: 1rem; padding: 2px 10px; border-radius: 999px; color: var(--on-status);
+    white-space: nowrap;
+  }
+  .badge.closed { background: var(--fixed); }
+  .badge.open { background: var(--open); }
+  .badge.error { background: var(--error); }
+  .result-line { color: var(--muted); }
+  .result-line strong { color: var(--fg); }
+  .field { margin: 0 0 8px; }
+  .field strong { display: block; }
+  .field.how { font-size: 16px; }
+  .field.how code { font-family: ui-monospace, Consolas, monospace; font-size: 16px; overflow-wrap: anywhere; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0 4px; }
+  .note { background: var(--card2); border-radius: 10px; padding: 10px 12px; margin: 12px 0 4px; }
+
+  .panel { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 12px 0 0; }
+  .panel ol { margin: 0 0 8px; padding-left: 1.4em; }
+  .panel li { margin: 0 0 4px; }
+  .panel .final { font-weight: 600; }
+  .panel .final.good { color: var(--fixed); }
+  .panel .final.bad { color: var(--error); }
+  .confirm { border: 2px solid var(--open); border-radius: 10px; padding: 12px; margin: 8px 0 0; }
+  .confirm.danger { border-color: var(--error); }
+  .confirm p { font-weight: 600; }
+  pre {
+    font-family: ui-monospace, Consolas, monospace; font-size: 16px; white-space: pre-wrap; word-break: break-word;
+    background: var(--card2); border-radius: 8px; padding: 10px; margin: 8px 0 0; max-height: 320px; overflow-y: auto;
+  }
+  details { margin: 8px 0 0; }
+  summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+  .more { border-top: 1px solid var(--line); margin: 12px 0 0; padding: 12px 0 0; }
+  .more ul { margin: 0 0 12px; padding-left: 1.2em; }
+  .more li { margin: 0 0 4px; }
+  dl.tech { margin: 8px 0 0; }
+  dl.tech dt { font-weight: 600; margin: 8px 0 0; }
+  dl.tech dd { margin: 0; color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 16px; }
+
+  .box { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+  .filters button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+  .feed { list-style: none; margin: 0; padding: 0; }
+  .feed li { padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .feed li:last-child { border-bottom: none; }
+  .bars {
+    display: flex; align-items: flex-end; gap: 4px; height: 120px; margin: 0 0 8px;
+    border-bottom: 2px solid var(--line); overflow: hidden;
+  }
+  .bar { flex: 1 1 0; min-width: 4px; max-width: 48px; display: flex; flex-direction: column-reverse; height: 100%; }
+  .bar span { display: block; }
+  .bar .b-fixed { background: var(--fixed); }
+  .bar .b-error { background: var(--error); }
+  .bar .b-open { background: var(--open); opacity: .35; }
+  .runs { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow-y: auto; }
+  .runs li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 12px; color: var(--muted); }
+  .legend span::before { content: ""; display: inline-block; width: 14px; height: 14px; border-radius: 3px; margin-right: 6px; vertical-align: -2px; }
+  .legend .l-fixed::before { background: var(--fixed); }
+  .legend .l-open::before { background: var(--open); opacity: .35; }
+  .legend .l-error::before { background: var(--error); }
+  .pct { font-weight: 600; }
+  dl.glossary { margin: 0; display: grid; grid-template-columns: 1fr; gap: 12px; }
+  @media (min-width: 900px) { dl.glossary { grid-template-columns: 1fr 1fr; } }
+  dl.glossary dt { font-weight: 700; }
+  dl.glossary dd { margin: 0; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Lab status in plain words</h1>
+  <p class="safety">Nothing changes unless you press a button and confirm. Every change is written to the activity log.</p>
+
+  <div class="controls">
+    <button id="refresh" type="button">Refresh</button>
+    <button id="scan" type="button" class="primary">Run a fresh check</button>
+    <label><input id="auto" type="checkbox"> Refresh by itself every 30 seconds</label>
+  </div>
+  <div class="controls">
+    <input id="search" type="search" placeholder="Search problems, for example: password" aria-label="Search problems">
+    <label>Show
+      <select id="filter" aria-label="Filter problems">
+        <option value="all">All</option>
+        <option value="closed">Fixed</option>
+        <option value="open">Still open</option>
+        <option value="error">Could not check</option>
+      </select>
+    </label>
+  </div>
+  <p id="status" role="status" aria-live="polite"></p>
+
+  <section aria-labelledby="sum-h">
+    <h2 id="sum-h" class="muted">Summary</h2>
+    <p id="headline">Loading...</p>
+    <div class="progress" id="progress" role="progressbar" aria-valuemin="0" aria-valuemax="9" aria-valuenow="0" aria-label="Problems fixed"><div id="progress-fill"></div></div>
+    <p class="progress-label" id="progress-label"></p>
+    <div class="counts">
+      <button type="button" class="count closed" data-filter="closed" aria-pressed="false">
+        <span class="num" id="n-closed">0</span><span class="lbl">Fixed</span><span class="hint">Tap to show only these</span>
+      </button>
+      <button type="button" class="count open" data-filter="open" aria-pressed="false">
+        <span class="num" id="n-open">0</span><span class="lbl">Still open</span><span class="hint">Left open on purpose</span>
+      </button>
+      <button type="button" class="count error" data-filter="error" aria-pressed="false">
+        <span class="num" id="n-error">0</span><span class="lbl">Could not check</span><span class="hint">The check did not finish</span>
+      </button>
+    </div>
+    <p id="last-checked" class="muted"></p>
+  </section>
+
+  <section aria-labelledby="prob-h">
+    <h2 id="prob-h">The problems</h2>
+    <div class="grid" id="problems"></div>
+    <p id="no-match" class="muted" hidden>No problems match your search or filter.</p>
+  </section>
+
+  <div class="grid">
+    <section class="box" aria-labelledby="act-h">
+      <h2 id="act-h">Activity</h2>
+      <p class="muted">Everything that was done, newest first.</p>
+      <div class="filters" id="feed-filters">
+        <button type="button" data-feed="all" aria-pressed="true">All</button>
+        <button type="button" data-feed="change" aria-pressed="false">Changes made</button>
+        <button type="button" data-feed="preview" aria-pressed="false">Previews only</button>
+        <button type="button" data-feed="check" aria-pressed="false">Checks</button>
+      </div>
+      <ul class="feed" id="feed"></ul>
+      <button type="button" class="link" id="feed-more" hidden>Show older activity</button>
+    </section>
+
+    <section class="box" aria-labelledby="hist-h">
+      <h2 id="hist-h">Check history</h2>
+      <p class="pct" id="pct-line"></p>
+      <div class="legend"><span class="l-fixed">Fixed</span><span class="l-open">Still open</span><span class="l-error">Could not check</span></div>
+      <div class="bars" id="bars" aria-hidden="true"></div>
+      <p class="muted">Oldest on the left, newest on the right. Each list line below is one run.</p>
+      <ul class="runs" id="runs"></ul>
+    </section>
+  </div>
+
+  <section class="box" aria-labelledby="gl-h" style="margin-top:32px">
+    <h2 id="gl-h">Words used on this page</h2>
+    <dl class="glossary" id="glossary"></dl>
+  </section>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var ORDER = ["CLD-01", "CLD-02", "CLD-03", "CLD-04", "CLD-05", "CLD-06", "CLD-07", "CLD-08", "CLD-09"];
+
+  var HOW = {
+    "CLD-01": "Instance metadata allows IMDSv1 (HttpTokens = optional), so requests without a session token are accepted.",
+    "CLD-02": "Security group vuln-lab-target-sg has an ingress rule for tcp/22 from 0.0.0.0/0.",
+    "CLD-03": "Security group vuln-lab-target-sg has an ingress rule for tcp/3306 (MySQL/MariaDB) from 0.0.0.0/0.",
+    "CLD-04": "Security group vuln-lab-target-sg has an ingress rule for tcp/6379 (Redis, no auth, protected mode off) from 0.0.0.0/0.",
+    "CLD-05": "Root EBS volume is unencrypted (Encrypted = False). Encryption cannot be turned on in place, so the volume must be recreated.",
+    "CLD-06": "IAM inline policy overly-permissive-s3 on the instance role grants s3:* on Resource *.",
+    "CLD-07": "The instance user data exports a database admin password as plain text. The value is not shown here.",
+    "CLD-08": "The VPC has no flow log, so no network traffic metadata is recorded to CloudWatch Logs or S3.",
+    "CLD-09": "Detailed monitoring is off (1-minute metrics disabled), so CloudWatch samples only every 5 minutes."
+  };
+
+  var PLAIN = {
+    "CLD-01": {
+      title: "Old, less safe way of reading server settings",
+      wrong: "The server accepts an older, less safe way of asking for its own settings.",
+      fixed: "Now requires the safer way.",
+      why: "Attackers can abuse the older method to steal the server's access keys.",
+      fix: "Changes a server setting so it only accepts the safer way of asking for its settings.",
+      topic: "server settings problem"
+    },
+    "CLD-02": {
+      title: "SSH login open to the internet",
+      wrong: "Anyone on the internet could try to log in over SSH.",
+      fixed: "Closed to the internet.",
+      why: "Login doors open to everyone are the first thing attackers try.",
+      fix: "Removes the network rule that let anyone on the internet reach SSH.",
+      topic: "SSH problem"
+    },
+    "CLD-03": {
+      title: "MySQL database open to the internet",
+      wrong: "Anyone on the internet could reach the MySQL database.",
+      fixed: "Closed to the internet.",
+      why: "Databases open to the internet can be read or broken into.",
+      fix: "Removes the network rule that let anyone on the internet reach MySQL.",
+      topic: "MySQL problem"
+    },
+    "CLD-04": {
+      title: "Redis data store open to the internet",
+      wrong: "Anyone on the internet could reach the Redis data store.",
+      fixed: "Closed to the internet.",
+      why: "Redis without a password lets anyone read or change its data.",
+      fix: "Removes the network rule that let anyone on the internet reach Redis.",
+      topic: "Redis problem"
+    },
+    "CLD-05": {
+      title: "Main disk not encrypted",
+      wrong: "The main disk is not encrypted.",
+      open: "Needs a rebuild to fix. Left open on purpose.",
+      why: "If the disk is copied, its data can be read.",
+      fix: "Rebuilds the server with an encrypted disk. This is done by hand, not from this page.",
+      topic: "disk problem"
+    },
+    "CLD-06": {
+      title: "Server allowed to do anything with storage",
+      wrong: "The server was allowed to do anything with storage.",
+      fixed: "Permission removed.",
+      why: "A broken server could then read or delete every stored file.",
+      fix: "Removes the permission that let the server do anything with storage.",
+      topic: "storage permission problem"
+    },
+    "CLD-07": {
+      title: "Password written in the startup script",
+      wrong: "A database password is written in plain text in the startup script.",
+      open: "Needs a design change to move it to a secret store. Left open on purpose.",
+      why: "Anyone who can read the startup script gets the password.",
+      fix: "Moves the password out of the startup script into a secret store. This is a design change done by hand.",
+      topic: "startup script problem"
+    },
+    "CLD-08": {
+      title: "Network traffic not recorded",
+      wrong: "Network traffic is not being recorded.",
+      open: "Needs a logging setup. Left open on purpose.",
+      why: "Without records, an attack leaves no trail to investigate.",
+      fix: "Turns on recording of network traffic. This needs a logging setup done by hand.",
+      topic: "network recording problem"
+    },
+    "CLD-09": {
+      title: "Detailed monitoring off",
+      wrong: "Detailed monitoring was off.",
+      fixed: "Turned on.",
+      why: "Slower monitoring means problems are spotted later.",
+      fix: "Turns on detailed monitoring for the server.",
+      topic: "monitoring problem"
+    }
+  };
+
+  var ACTIONS = {
+    "ec2:RevokeSecurityGroupIngress": "a network rule that let outsiders in was removed",
+    "ec2:AuthorizeSecurityGroupIngress": "a network rule was added back, reopening the problem",
+    "iam:DeleteRolePolicy": "an over-broad permission was removed",
+    "iam:PutRolePolicy": "the over-broad permission was added back, reopening the problem",
+    "ec2:ModifyInstanceMetadataOptions": "a server setting was changed to the safer option",
+    "ec2:MonitorInstances": "detailed monitoring was turned on",
+    "ec2:UnmonitorInstances": "detailed monitoring was turned off, reopening the problem",
+    "verify": "a check ran afterwards to confirm the result",
+    "plan": "a preview was run. Nothing was changed"
+  };
+
+  // What a single engine step will do, used for the live preview and fix output.
+  var STEPS = {
+    "ec2:RevokeSecurityGroupIngress": "remove a network rule that lets outsiders in",
+    "ec2:AuthorizeSecurityGroupIngress": "add a network rule back",
+    "iam:DeleteRolePolicy": "remove an over-broad permission",
+    "iam:PutRolePolicy": "add the over-broad permission back",
+    "ec2:ModifyInstanceMetadataOptions": "change a server setting",
+    "ec2:MonitorInstances": "turn on detailed monitoring",
+    "ec2:UnmonitorInstances": "turn off detailed monitoring"
+  };
+
+  var STATUS_LABEL ={ closed: "Fixed", open: "Still open", error: "Could not check" };
+
+  var GLOSSARY = [
+    ["Security group", "A list of network rules that says who can reach the server and on which doors (ports)."],
+    ["Metadata setting (IMDS)", "How the server asks for its own settings and access keys. The newer, safer way needs a short-lived pass first."],
+    ["IAM policy", "A written list of what the server is allowed to do in the cloud account, such as reading stored files."],
+    ["Dry-run", "A preview. It shows what a fix would change without changing anything."],
+    ["Rollback", "Undoing a fix, putting things back the way they were. In this lab that reopens the problem on purpose."],
+    ["Audit log", "A permanent record of every preview, change, and check, with the time it happened."],
+    ["Compliance", "How many of the known problems are fixed, shown as a percentage."],
+    ["Approval", "A person signing off on a fix before it is allowed to run. Without it, the Fix and Undo buttons stay hidden."]
+  ];
+
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var SECRET_MARKERS = ["password", "secret", "token"];
+  var LOAD_FAILED = "Could not load the latest results. Run a check first.";
+  var FEED_PAGE = 25;
+  var AUTO_MS = 30000;
+
+  // ---- state ----
+  var state = { data: null, rules: {}, perFinding: null };
+  var busy = false;
+  var panels = {};      // rule id -> { title, lines, raw, final, finalKind, confirm, dom }
+  var expanded = {};    // rule id -> true when "Show more" is open
+  var feedFilter = "all";
+  var feedShowAll = false;
+  var autoTimer = null;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var refreshBtn = $("refresh"), scanBtn = $("scan"), autoBox = $("auto");
+  var searchBox = $("search"), filterSel = $("filter"), statusEl = $("status");
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = String(text);
+    return n;
+  }
+
+  function count(n) { return typeof n === "number" && n >= 0 ? n : 0; }
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+  function hasSecret(s) {
+    var low = String(s).toLowerCase();
+    return SECRET_MARKERS.some(function (m) { return low.indexOf(m) !== -1; });
+  }
+  function safeText(v) {
+    if (v === null || v === undefined || v === "") return "(none)";
+    var s = typeof v === "string" ? v : JSON.stringify(v);
+    return hasSecret(s) ? "(hidden because it mentions a secret)" : s;
+  }
+  function capitalize(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+  function fmtPct(n) {
+    var r = Math.round(n * 10) / 10;
+    return (r % 1 === 0 ? r.toFixed(0) : r.toFixed(1)) + "%";
+  }
+
+  // ---- time ----
+  function parseTime(s) {
+    if (typeof s !== "string" || !s) return null;
+    var d = new Date(s);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  function sameDay(a, b) {
+    return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  }
+  function clock(d) { return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }); }
+  function dayName(d) {
+    var now = new Date();
+    if (sameDay(d, now)) return "today";
+    var y = new Date(now); y.setDate(now.getDate() - 1);
+    if (sameDay(d, y)) return "yesterday";
+    var s = d.getDate() + " " + MONTHS[d.getMonth()];
+    if (d.getFullYear() !== now.getFullYear()) s += " " + d.getFullYear();
+    return "on " + s;
+  }
+  // "today at 5:42 PM" / "on 10 Oct at 5:42 PM"
+  function whenPhrase(d) { return dayName(d) + " at " + clock(d); }
+  // "At 5:42 PM" for today, otherwise "Yesterday at 5:42 PM" / "On 10 Oct at 5:42 PM"
+  function atPhrase(d) {
+    var day = dayName(d);
+    return day === "today" ? "At " + clock(d) : capitalize(day) + " at " + clock(d);
+  }
+  function plainDate(ymd) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || ""));
+    if (!m) return "";
+    var s = Number(m[3]) + " " + MONTHS[Number(m[2]) - 1];
+    if (Number(m[1]) !== new Date().getFullYear()) s += " " + m[1];
+    return s;
+  }
+
+  // ---- problem helpers ----
+  function findingsById() {
+    var out = {};
+    var list = state.data && Array.isArray(state.data.findings) ? state.data.findings : [];
+    list.forEach(function (f) { if (f && typeof f.id === "string") out[f.id] = f; });
+    return out;
+  }
+  function statusOf(f) {
+    var s = f && f.status;
+    return s === "closed" || s === "open" ? s : "error";
+  }
+  function approverOf(id, f) {
+    var rule = state.rules[id];
+    var who = rule && rule.approved_by !== undefined ? rule.approved_by : (f && f.approved_by);
+    who = who === null || who === undefined ? "" : String(who).trim();
+    return who.toLowerCase() === "pending" ? "" : who;
+  }
+  function fixTypeOf(id, f) {
+    var rule = state.rules[id];
+    var t = rule && rule.fix && typeof rule.fix === "object" ? rule.fix.type : (f && f.fix_type);
+    return t || "";
+  }
+  function approvalText(id, f) {
+    var who = approverOf(id, f);
+    if (!who) return "Waiting for approval";
+    var rule = state.rules[id];
+    var on = rule ? plainDate(rule.approved_on) : "";
+    return "Approved by " + who + (on ? " on " + on : "");
+  }
+  function resultText(id, st, automated, approved) {
+    var p = PLAIN[id];
+    if (st === "closed") return { label: "Fixed: ", text: p.fixed || "Fixed." };
+    if (st === "open") {
+      if (p.open) return { label: "Open: ", text: p.open };
+      return { label: "Open: ", text: automated && approved ? "Not fixed right now. You can fix it with the button below." : "Not fixed yet." };
+    }
+    return { label: "", text: "Could not be checked this time." };
+  }
+
+  // ---- activity sentences ----
+  function actionPhrase(action, mode) {
+    var a = String(action || "");
+    if (a === "plan" || mode === "dry-run") return ACTIONS.plan;
+    if (a.indexOf("verify") === 0) return ACTIONS.verify;
+    if (a === "ec2:ModifyInstanceMetadataOptions" && mode === "rollback") {
+      return "a server setting was changed back to the older option, reopening the problem";
+    }
+    return ACTIONS[a] || (mode === "rollback" ? "a change was undone, reopening the problem" : "a change was made");
+  }
+  function isGood(result) {
+    var r = String(result || "").toLowerCase();
+    return r === "success" || r === "passed" || r === "planned" || r === "ok" || r === "no_change" || r === "skipped";
+  }
+  function verifyTail(mode, result) {
+    var r = String(result || "").toLowerCase();
+    if (r === "passed") return mode === "rollback" ? "A check afterwards confirmed it was open again." : "A check afterwards confirmed it was closed.";
+    if (r === "pending") return "A check afterwards could not run.";
+    return "A check afterwards did not get the expected result.";
+  }
+  function topicOf(id) { return PLAIN[id] ? " (" + PLAIN[id].topic + ")" : ""; }
+
+  // Turn raw audit rows into feed items, joining an action with the check that followed it.
+  function buildActivity() {
+    var audit = state.data && Array.isArray(state.data.audit) ? state.data.audit : [];
+    var rows = audit.filter(function (a) { return a && typeof a === "object"; }).map(function (a) {
+      return { a: a, t: parseTime(a.timestamp) };
+    });
+    var items = [];
+    for (var i = 0; i < rows.length; i++) {
+      var a = rows[i].a, t = rows[i].t;
+      var action = String(a.action || ""), mode = String(a.mode || "");
+      var id = typeof a.rule_id === "string" ? a.rule_id : "";
+      var at = t ? atPhrase(t) : "At an unknown time";
+      var isVerify = action.indexOf("verify") === 0;
+      var isPlan = action === "plan" || mode === "dry-run";
+      var text, cats;
+      if (isPlan) {
+        text = at + ", a preview was run" + topicOf(id) + ". Nothing was changed.";
+        if (!isGood(a.result)) text += " The preview did not finish.";
+        cats = ["preview"];
+      } else if (isVerify) {
+        text = at + ", " + ACTIONS.verify + topicOf(id) + ". " + verifyTail(mode, a.result).replace("A check afterwards ", "It ");
+        cats = ["check"];
+      } else {
+        text = at + ", " + actionPhrase(action, mode) + topicOf(id) + ".";
+        if (!isGood(a.result)) text += " This step did not succeed.";
+        cats = ["change"];
+        var next = rows[i + 1];
+        if (next && String(next.a.action || "").indexOf("verify") === 0 && next.a.rule_id === a.rule_id &&
+            String(next.a.mode || "") === mode && (!t || !next.t || next.t - t < 5 * 60 * 1000)) {
+          text += " " + verifyTail(mode, next.a.result);
+          cats.push("check");
+          i++;
+        }
+      }
+      items.push({ t: t, text: text, cats: cats, id: id });
+    }
+    var hist = state.data && Array.isArray(state.data.history) ? state.data.history : [];
+    hist.forEach(function (h) {
+      var t = parseTime(h.timestamp_utc);
+      items.push({
+        t: t,
+        text: (t ? atPhrase(t) : "At an unknown time") + ", a full check of the lab ran: " + runCounts(h) + ".",
+        cats: ["check"], id: ""
+      });
+    });
+    items.sort(function (x, y) { return (y.t ? y.t.getTime() : 0) - (x.t ? x.t.getTime() : 0); });
+    return items;
+  }
+  function runCounts(h) {
+    return count(h.closed) + " fixed, " + count(h.open) + " open, " + count(h.error) + " could not check";
+  }
+
+  // ---- engine output in plain words ----
+  function plainLine(line, mode) {
+    var s = String(line);
+    var m;
+    if (!s.trim()) return null;
+    if (s === "Rebuilding dashboard data...") return "Updating the dashboard with the new results.";
+    if (s === "Read-only: no changes will be made.") return "This is only a preview. Nothing will be changed.";
+    if (/^Account /.test(s)) return "Connected to the lab's cloud account.";
+    if ((m = /: (\d+) of (\d+) step\(s\) would change/.exec(s))) {
+      return plural(Number(m[1]), "step", "steps") + " out of " + m[2] + " would make a change. Nothing was changed.";
+    }
+    if (/: dry-run of fix/.test(s)) return "Preparing a preview of the fix.";
+    if ((m = /^CLD-0\d: (apply|rollback) \(/.exec(s))) return m[1] === "apply" ? "Starting the fix." : "Starting to undo the fix.";
+    if ((m = /^\[(\d+)\/(\d+)\] (.+)$/.exec(s))) {
+      return "Step " + m[1] + " of " + m[2] + ": " + (STEPS[m[3].trim()] || "make a change") + ".";
+    }
+    if ((m = /^\s+target:\s+(\S+)\s+(\S+)/.exec(s))) return "This affects the " + m[1].replace(/_/g, " ") + " named " + m[2] + ".";
+    if ((m = /^\s+status:\s+(.+)$/.exec(s))) return "Result of this step: " + m[1].replace(/_/g, " ") + ".";
+    if (/^\s+(current|would set|before|after|evidence):/.test(s)) return null;
+    if (/already in desired state/.test(s)) return "Already in the right state. No change was needed.";
+    if (/: done$/.test(s)) return "Done.";
+    if (/FAILED/.test(s)) return "This step failed. The exact output below has the details.";
+    if (/^Verify attempt/.test(s)) return "The check is not settled yet. Trying again in a moment.";
+    if ((m = /^Verify \S+: status=(\w+) \(expected (\w+)\) (PASS|FAIL)/.exec(s))) {
+      var found = m[1] === "closed" ? "fixed" : m[1] === "open" ? "open" : "unclear";
+      return "A check found the problem is " + found + ". " + (m[3] === "PASS" ? "That is what was expected." : "That is not what was expected.");
+    }
+    if (/^Verify pending/.test(s)) return "The follow-up check could not run.";
+    if (/REFUSED/.test(s)) return "The tool refused to run this. The exact output below has the reason.";
+    if (/AWS error/.test(s)) return "The cloud account returned an error.";
+    if (/approval pending/.test(s)) return "Waiting for approval, so nothing was done.";
+    if (/stopped after a failed step/.test(s)) return "Stopped after a failed step. Nothing more was changed.";
+    if (/manual (fix|apply|rollback)/.test(s)) return "This one is fixed by hand. The tool makes no changes.";
+    if (/no .* steps defined/.test(s)) return "There is nothing for the tool to do here.";
+    return null;
+  }
+
+  // ---- network ----
+  function getJSON(url) {
+    return fetch(url, { cache: "no-store" }).then(function (r) {
+      if (!r.ok) throw new Error("status " + r.status);
+      return r.json();
+    });
+  }
+
+  // POST to a /stream route and call onLine(text) per output line. Resolves to
+  // { result } on success or { httpStatus, detail } when the server refused.
+  async function streamPost(url, onLine) {
+    var resp;
+    try {
+      resp = await fetch(url, { method: "POST", cache: "no-store" });
+    } catch (e) {
+      return { networkError: true };
+    }
+    if (!resp.ok) {
+      var body = await resp.json().catch(function () { return {}; });
+      return { httpStatus: resp.status, detail: body && typeof body.detail === "string" ? body.detail : "" };
+    }
+    var result = null;
+    function handle(raw) {
+      if (!raw.trim()) return;
+      var msg;
+      try { msg = JSON.parse(raw); } catch (e) { return; }
+      if (msg && msg.type === "line") onLine(String(msg.text == null ? "" : msg.text));
+      else if (msg && msg.type === "result") result = msg.result || {};
+    }
+    if (resp.body && resp.body.getReader) {
+      var reader = resp.body.getReader(), dec = new TextDecoder(), buf = "";
+      try {
+        for (;;) {
+          var chunk = await reader.read();
+          if (chunk.done) break;
+          buf += dec.decode(chunk.value, { stream: true });
+          var parts = buf.split("\n");
+          buf = parts.pop();
+          parts.forEach(handle);
+        }
+      } catch (e) {
+        return { networkError: true, result: result };
+      }
+      handle(buf + dec.decode());
+    } else {
+      (await resp.text()).split("\n").forEach(handle);
+    }
+    return { result: result };
+  }
+
+  function refusalText(r) {
+    if (r.networkError) return "The connection to the dashboard was lost.";
+    if (r.httpStatus === 409) return "Another check or change is already running. Try again in a minute.";
+    if (r.httpStatus === 403) return "This fix is waiting for approval, so it cannot run.";
+    if (r.httpStatus === 404) return "The fix plan for this problem could not be found.";
+    return "The request did not go through.";
+  }
+
+  // ---- loading ----
+  async function loadData() {
+    var data;
+    try {
+      data = await getJSON("/api/data");
+      if (!data || typeof data !== "object" || !data.summary) throw new Error("bad body");
+    } catch (e) {
+      state.data = null;
+      renderAll();
+      return false;
+    }
+    var rules = {};
+    await Promise.all(ORDER.map(function (id) {
+      return getJSON("/api/rules/" + id).then(function (r) {
+        if (r && typeof r === "object") rules[id] = r;
+      }).catch(function () {});
+    }));
+    var perFinding = null;
+    try {
+      var h = await getJSON("/api/history/findings");
+      if (h && Array.isArray(h.runs)) perFinding = h.runs;
+    } catch (e) { perFinding = null; }
+    state.data = data;
+    state.rules = rules;
+    state.perFinding = perFinding;
+    renderAll();
+    return true;
+  }
+
+  // ---- rendering ----
+  function buildHeadline(s) {
+    var total = count(s.total), closed = count(s.closed), open = count(s.open), error = count(s.error);
+    var first = "The lab has " + plural(total, "deliberate problem", "deliberate problems") + ".";
+    var fixedPart = closed + (closed === 1 ? " is fixed" : " are fixed");
+    var openPart = open + (open === 1 ? " is not" : " are not");
+    var last = error === 0 ? "nothing went wrong." : plural(error, "check", "checks") + " could not finish.";
+    return first + " " + fixedPart + ", " + openPart + ", and " + last;
+  }
+
+  function renderSummary() {
+    var d = state.data;
+    if (!d) {
+      $("headline").textContent = LOAD_FAILED;
+      $("progress-fill").style.width = "0%";
+      $("progress-label").textContent = "";
+      $("last-checked").textContent = "";
+      ["closed", "open", "error"].forEach(function (k) { $("n-" + k).textContent = "0"; });
+      return;
+    }
+    var s = d.summary;
+    var total = count(s.total), closed = count(s.closed);
+    $("headline").textContent = buildHeadline(s);
+    var pct = total ? closed / total * 100 : 0;
+    $("progress-fill").style.width = pct + "%";
+    var bar = $("progress");
+    bar.setAttribute("aria-valuemax", String(total));
+    bar.setAttribute("aria-valuenow", String(closed));
+    $("progress-label").textContent = closed + " of " + total + " fixed (" + fmtPct(pct) + ").";
+    $("n-closed").textContent = String(closed);
+    $("n-open").textContent = String(count(s.open));
+    $("n-error").textContent = String(count(s.error));
+    var hist = Array.isArray(d.history) ? d.history : [];
+    var last = hist.length ? parseTime(hist[hist.length - 1].timestamp_utc) : null;
+    last = last || parseTime(d.generated_at_utc);
+    $("last-checked").textContent = last ? "Checked " + whenPhrase(last) + "." : "Not checked yet.";
+    var f = filterSel.value;
+    document.querySelectorAll(".count").forEach(function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-filter") === f ? "true" : "false");
+    });
+  }
+
+  function searchText(id, st) {
+    var p = PLAIN[id];
+    return [p.title, p.wrong, p.fixed || "", p.open || "", p.why, p.fix, STATUS_LABEL[st]].join(" ").toLowerCase();
+  }
+
+  function renderProblems() {
+    var wrap = $("problems");
+    wrap.textContent = "";
+    if (!state.data) { $("no-match").hidden = true; return; }
+    var byId = findingsById();
+    var q = searchBox.value.trim().toLowerCase();
+    var f = filterSel.value;
+    var shown = 0;
+    ORDER.forEach(function (id) {
+      var finding = byId[id] || null;
+      var st = statusOf(finding);
+      if (f !== "all" && f !== st) return;
+      if (q && searchText(id, st).indexOf(q) === -1) return;
+      shown++;
+      wrap.appendChild(problemCard(id, finding, st));
+    });
+    $("no-match").hidden = shown !== 0;
+  }
+
+  function field(label, text) {
+    var p = el("p", "field");
+    p.appendChild(el("strong", "", label));
+    p.appendChild(document.createTextNode(text));
+    return p;
+  }
+
+  function problemCard(id, finding, st) {
+    var p = PLAIN[id];
+    var automated = fixTypeOf(id, finding) === "automated";
+    var approved = !!approverOf(id, finding);
+    var card = el("article", "problem " + st);
+
+    var head = el("div", "problem-head");
+    head.appendChild(el("h3", "", p.title));
+    head.appendChild(el("span", "badge " + st, STATUS_LABEL[st]));
+    card.appendChild(head);
+
+    var res = resultText(id, st, automated, approved);
+    var rp = el("p", "result-line");
+    if (res.label) rp.appendChild(el("strong", "", res.label));
+    rp.appendChild(document.createTextNode(res.text));
+    card.appendChild(rp);
+
+    card.appendChild(field("What's wrong", p.wrong));
+    if (HOW[id]) {
+      var how = el("p", "field how");
+      how.appendChild(el("strong", "", "How it works (technical)"));
+      how.appendChild(el("code", "", HOW[id]));
+      card.appendChild(how);
+    }
+    card.appendChild(field("Why it matters", p.why));
+    card.appendChild(field("What the fix does", p.fix));
+    card.appendChild(field("Who approved the fix", approvalText(id, finding)));
+
+    if (!automated) {
+      card.appendChild(el("p", "note", "This needs a rebuild or a design change. It is left open on purpose."));
+    } else {
+      var actions = el("div", "actions");
+      var dry = el("button", "act", "See what would change");
+      dry.type = "button";
+      dry.addEventListener("click", function () { runPreview(id, false); });
+      actions.appendChild(dry);
+      if (approved && st === "open") {
+        var fix = el("button", "act fix solid", "Fix it");
+        fix.type = "button";
+        fix.addEventListener("click", function () { runPreview(id, true); });
+        actions.appendChild(fix);
+      } else if (approved && st === "closed") {
+        var undo = el("button", "act danger", "Undo the fix");
+        undo.type = "button";
+        undo.addEventListener("click", function () { askUndo(id); });
+        actions.appendChild(undo);
+      }
+      card.appendChild(actions);
+      if (!approved) card.appendChild(el("p", "note", "Waiting for approval"));
+    }
+
+    if (panels[id]) card.appendChild(renderPanel(id));
+
+    var toggle = el("button", "link", expanded[id] ? "Show less" : "Show more");
+    toggle.type = "button";
+    toggle.setAttribute("aria-expanded", expanded[id] ? "true" : "false");
+    toggle.addEventListener("click", function () {
+      expanded[id] = !expanded[id];
+      renderProblems();
+    });
+    card.appendChild(toggle);
+    if (expanded[id]) card.appendChild(moreSection(id, finding, st));
+
+    card.querySelectorAll("button.act").forEach(function (b) { b.disabled = busy; });
+    return card;
+  }
+
+  function moreSection(id, finding, st) {
+    var box = el("div", "more");
+
+    box.appendChild(el("h4", "", "History of this problem"));
+    var runs = state.perFinding;
+    if (!runs) {
+      box.appendChild(el("p", "muted", "The check history for this problem could not be loaded."));
+    } else {
+      var ul = el("ul");
+      runs.slice().reverse().forEach(function (r) {
+        if (!r || !r.statuses || !(id in r.statuses)) return;
+        var t = parseTime(r.timestamp_utc);
+        var s = r.statuses[id];
+        var word = s === "closed" ? "fixed" : s === "open" ? "not fixed" : "could not be checked";
+        ul.appendChild(el("li", "", (t ? atPhrase(t) : "At an unknown time") + ", a check found this " + word + "."));
+      });
+      if (!ul.children.length) box.appendChild(el("p", "muted", "No checks have been recorded yet."));
+      else box.appendChild(ul);
+    }
+
+    box.appendChild(el("h4", "", "Recent activity for this problem"));
+    var acts = buildActivity().filter(function (it) { return it.id === id; });
+    if (!acts.length) {
+      box.appendChild(el("p", "muted", "Nothing has been done to this problem yet."));
+    } else {
+      var al = el("ul");
+      acts.slice(0, 15).forEach(function (it) { al.appendChild(el("li", "", it.text.replace(topicOf(id), ""))); });
+      box.appendChild(al);
+    }
+
+    var det = el("details");
+    det.appendChild(el("summary", "", "Technical details"));
+    det.appendChild(el("p", "muted", "These are the exact names and values the tools recorded. You do not need them to understand the status."));
+    var dl = el("dl", "tech");
+    var rule = state.rules[id] || {};
+    var fixSec = rule.fix && typeof rule.fix === "object" ? rule.fix : {};
+    var rbSec = rule.rollback && typeof rule.rollback === "object" ? rule.rollback : {};
+    var steps = Array.isArray(fixSec.steps) ? fixSec.steps.map(function (s) { return s && s.action; }).filter(Boolean).join(", ") : "";
+    [
+      ["ID", id],
+      ["Original title", finding && finding.title],
+      ["Severity", finding && finding.severity],
+      ["Layer", finding && finding.layer],
+      ["Raw status", finding ? finding.status : "(missing from the latest check)"],
+      ["Evidence", finding && finding.evidence],
+      ["Fix type", fixTypeOf(id, finding)],
+      ["Fix available", finding ? String(!!finding.fix_available) : ""],
+      ["approved_by", rule.approved_by !== undefined ? rule.approved_by : (finding && finding.approved_by)],
+      ["approved_on", rule.approved_on],
+      ["Fix steps", steps],
+      ["Fix description", fixSec.description],
+      ["Rollback description", rbSec.description],
+      ["Account", state.data && state.data.account_id],
+      ["Region", state.data && state.data.region],
+      ["Instance", state.data && state.data.instance_id]
+    ].forEach(function (row) {
+      dl.appendChild(el("dt", "", row[0]));
+      dl.appendChild(el("dd", "", safeText(row[1])));
+    });
+    det.appendChild(dl);
+    box.appendChild(det);
+    return box;
+  }
+
+  function renderPanel(id) {
+    var ps = panels[id];
+    var box = el("div", "panel");
+    box.setAttribute("aria-live", "polite");
+    box.appendChild(el("h4", "", ps.title));
+    var ol = el("ol");
+    ps.lines.forEach(function (l) { ol.appendChild(el("li", "", l)); });
+    box.appendChild(ol);
+    var final = el("p", "final" + (ps.finalKind ? " " + ps.finalKind : ""), ps.final || "");
+    box.appendChild(final);
+    var det = el("details");
+    det.appendChild(el("summary", "", "Exact tool output"));
+    var pre = el("pre", "", ps.raw.join("\n"));
+    det.appendChild(pre);
+    if (ps.raw.length) box.appendChild(det);
+    ps.dom = { ol: ol, pre: pre, final: final, det: det, box: box };
+
+    if (ps.confirm && !busy) {
+      var c = el("div", "confirm" + (ps.confirm.danger ? " danger" : ""));
+      c.appendChild(el("p", "", ps.confirm.text));
+      var row = el("div", "actions");
+      var yes = el("button", "act " + (ps.confirm.danger ? "danger solid" : "fix solid"), ps.confirm.yes);
+      yes.type = "button";
+      yes.addEventListener("click", function () { runChange(id, ps.confirm.mode); });
+      var no = el("button", "act", "Cancel");
+      no.type = "button";
+      no.addEventListener("click", function () { delete panels[id]; renderProblems(); });
+      row.appendChild(yes);
+      row.appendChild(no);
+      c.appendChild(row);
+      box.appendChild(c);
+    } else if (!busy) {
+      var close = el("button", "link", "Close this panel");
+      close.type = "button";
+      close.addEventListener("click", function () { delete panels[id]; renderProblems(); });
+      box.appendChild(close);
+    }
+    return box;
+  }
+
+  function panelLine(id, raw, mode) {
+    var ps = panels[id];
+    if (!ps) return;
+    ps.raw.push(raw);
+    var plain = plainLine(raw, mode);
+    if (plain) ps.lines.push(plain);
+    if (ps.dom) {
+      if (plain) ps.dom.ol.appendChild(el("li", "", plain));
+      ps.dom.pre.textContent = ps.raw.join("\n");
+      if (!ps.dom.det.parentNode) ps.dom.box.insertBefore(ps.dom.det, ps.dom.final.nextSibling);
+    }
+  }
+
+  function panelFinal(id, text, kind) {
+    var ps = panels[id];
+    if (!ps) return;
+    ps.final = text;
+    ps.finalKind = kind || "";
+  }
+
+  function renderFeed() {
+    var ul = $("feed");
+    ul.textContent = "";
+    document.querySelectorAll("#feed-filters button").forEach(function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-feed") === feedFilter ? "true" : "false");
+    });
+    if (!state.data) { $("feed-more").hidden = true; return; }
+    var items = buildActivity().filter(function (it) {
+      return feedFilter === "all" || it.cats.indexOf(feedFilter) !== -1;
+    });
+    if (!items.length) ul.appendChild(el("li", "muted", "Nothing to show here yet."));
+    var limit = feedShowAll ? items.length : FEED_PAGE;
+    items.slice(0, limit).forEach(function (it) { ul.appendChild(el("li", "", it.text)); });
+    var more = $("feed-more");
+    more.hidden = items.length <= FEED_PAGE;
+    more.textContent = feedShowAll ? "Show only the newest activity" : "Show older activity (" + (items.length - FEED_PAGE) + " more)";
+  }
+
+  function renderHistory() {
+    var bars = $("bars"), runs = $("runs");
+    bars.textContent = "";
+    runs.textContent = "";
+    var hist = state.data && Array.isArray(state.data.history) ? state.data.history : [];
+    if (!hist.length) {
+      $("pct-line").textContent = state.data ? "No checks have been recorded yet." : "";
+      return;
+    }
+    function pctOf(h) {
+      var t = count(h.closed) + count(h.open) + count(h.error);
+      return t ? count(h.closed) / t * 100 : 0;
+    }
+    var first = pctOf(hist[0]), last = pctOf(hist[hist.length - 1]);
+    $("pct-line").textContent = hist.length === 1
+      ? "Protection is at " + fmtPct(last) + "."
+      : "Protection went from " + fmtPct(first) + " to " + fmtPct(last) + ".";
+    hist.forEach(function (h) {
+      var t = count(h.closed) + count(h.open) + count(h.error) || 1;
+      var b = el("div", "bar");
+      [["b-fixed", h.closed], ["b-error", h.error], ["b-open", h.open]].forEach(function (seg) {
+        var s = el("span", seg[0]);
+        s.style.height = (count(seg[1]) / t * 100) + "%";
+        b.appendChild(s);
+      });
+      bars.appendChild(b);
+    });
+    hist.slice().reverse().forEach(function (h) {
+      var d = parseTime(h.timestamp_utc);
+      var when = d ? (dayName(d) === "today" ? "Run at " + clock(d) : "Run " + dayName(d) + " at " + clock(d)) : "Run at an unknown time";
+      runs.appendChild(el("li", "", when + ": " + runCounts(h) + "."));
+    });
+  }
+
+  function renderGlossary() {
+    var dl = $("glossary");
+    GLOSSARY.forEach(function (g) {
+      var div = el("div");
+      div.appendChild(el("dt", "", g[0]));
+      div.appendChild(el("dd", "", g[1]));
+      dl.appendChild(div);
+    });
+  }
+
+  function renderAll() {
+    renderSummary();
+    renderProblems();
+    renderFeed();
+    renderHistory();
+  }
+
+  function setBusy(b) {
+    busy = b;
+    refreshBtn.disabled = b;
+    scanBtn.disabled = b;
+    renderProblems();
+  }
+
+  // ---- actions ----
+  // Dry-run into the card's panel. With thenAskFix, offer the fix once the preview finishes.
+  async function runPreview(id, thenAskFix) {
+    if (busy) return;
+    panels[id] = { title: thenAskFix ? "Preview before fixing: nothing is changed yet" : "Preview: nothing will be changed", lines: [], raw: [], final: "Running the preview...", finalKind: "" };
+    setBusy(true);
+    statusEl.textContent = "Running a preview for " + PLAIN[id].title.toLowerCase() + "...";
+    var r = await streamPost("/api/rules/" + id + "/dry-run/stream", function (line) { panelLine(id, line, "dry-run"); });
+    var ok = r.result && r.result.ok;
+    if (!r.result) panelFinal(id, refusalText(r), "bad");
+    else if (ok) panelFinal(id, "Preview finished. Nothing was changed.", "good");
+    else panelFinal(id, "The preview did not finish. The exact output has the details.", "bad");
+    if (ok && thenAskFix && panels[id]) {
+      panels[id].confirm = { text: "The preview above shows what will change. Fix this problem now?", yes: "Yes, fix it", mode: "apply", danger: false };
+    }
+    statusEl.textContent = ok ? "Preview finished. Nothing was changed." : "The preview did not finish.";
+    setBusy(false);
+    await loadData();
+  }
+
+  function askUndo(id) {
+    if (busy) return;
+    panels[id] = {
+      title: "Undo the fix", lines: [], raw: [], final: "", finalKind: "",
+      confirm: { text: "This will reopen the problem. Your lab will be vulnerable again. Continue?", yes: "Yes, undo the fix", mode: "rollback", danger: true }
+    };
+    renderProblems();
+  }
+
+  async function runChange(id, mode) {
+    if (busy) return;
+    var fixing = mode === "apply";
+    panels[id] = { title: fixing ? "Fixing the problem" : "Undoing the fix", lines: [], raw: [], final: fixing ? "Fixing..." : "Undoing...", finalKind: "" };
+    setBusy(true);
+    statusEl.textContent = (fixing ? "Fixing " : "Undoing the fix for ") + PLAIN[id].title.toLowerCase() + "...";
+    var r = await streamPost("/api/rules/" + id + "/" + mode + "/stream", function (line) { panelLine(id, line, mode); });
+    var ok = r.result && r.result.ok;
+    var msg;
+    if (!r.result) msg = refusalText(r);
+    else if (ok) msg = fixing ? "Fixed. The page now shows the latest results." : "The fix was undone. The problem is open again.";
+    else msg = "Something went wrong. Check the activity log and the exact output.";
+    panelFinal(id, msg, ok ? "good" : "bad");
+    statusEl.textContent = msg;
+    setBusy(false);
+    await loadData();
+  }
+
+  async function runScan() {
+    if (busy) return;
+    setBusy(true);
+    var steps = 0;
+    statusEl.textContent = "Checking...";
+    var r = await streamPost("/api/scan/stream", function () {
+      steps++;
+      statusEl.textContent = "Checking... (" + plural(steps, "line", "lines") + " of progress so far)";
+    });
+    var msg;
+    if (!r.result) msg = r.httpStatus === 409 ? "Another check is already running. Try again in a minute." : "Could not start the check.";
+    else if (r.result.ok === false) msg = "The check finished with problems. Showing the latest results.";
+    else msg = "Check finished.";
+    statusEl.textContent = msg;
+    await loadData();
+    setBusy(false);
+  }
+
+  // ---- wiring ----
+  refreshBtn.addEventListener("click", async function () {
+    if (busy) return;
+    refreshBtn.disabled = true;
+    scanBtn.disabled = true;
+    statusEl.textContent = "Refreshing...";
+    var ok = await loadData();
+    statusEl.textContent = ok ? "Up to date." : LOAD_FAILED;
+    refreshBtn.disabled = busy;
+    scanBtn.disabled = busy;
+  });
+  scanBtn.addEventListener("click", runScan);
+
+  autoBox.checked = false;
+  autoBox.addEventListener("change", function () {
+    if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+    if (autoBox.checked) {
+      autoTimer = setInterval(function () { if (!busy) loadData(); }, AUTO_MS);
+    }
+  });
+
+  searchBox.addEventListener("input", renderProblems);
+  filterSel.addEventListener("change", function () { renderSummary(); renderProblems(); });
+  document.querySelectorAll(".count").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var f = b.getAttribute("data-filter");
+      filterSel.value = filterSel.value === f ? "all" : f;
+      renderSummary();
+      renderProblems();
+      $("prob-h").scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+  document.querySelectorAll("#feed-filters button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      feedFilter = b.getAttribute("data-feed");
+      feedShowAll = false;
+      renderFeed();
+    });
+  });
+  $("feed-more").addEventListener("click", function () {
+    feedShowAll = !feedShowAll;
+    renderFeed();
+  });
+
+  renderGlossary();
+  loadData();
+})();
+</script>
+</body>
+</html>

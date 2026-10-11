@@ -38,12 +38,15 @@ from fastapi.responses import FileResponse, StreamingResponse
 WEBAPP_DIR = Path(__file__).resolve().parent
 ROOT = WEBAPP_DIR.parent
 INDEX_HTML = WEBAPP_DIR / "static" / "index.html"
+SIMPLE_HTML = WEBAPP_DIR / "static" / "simple.html"
 DASHBOARD_DATA = ROOT / "results" / "dashboard-data.json"
 HISTORY_DIR = ROOT / "results" / "history"
 RULES_DIR = ROOT / "remediations" / "rules"
 SCANNER = ROOT / "scanner" / "cloud_checks.py"
 ENGINE = ROOT / "remediations" / "engine.py"
 BUILDER = ROOT / "reports" / "build_dashboard_data.py"
+MANIFEST = ROOT / "vulns" / "manifest.yaml"
+PLAIN_FIELDS = ("plain_title", "plain_wrong", "technical", "plain_why", "plain_fix", "plain_open")
 
 HOST = "127.0.0.1"
 PROFILE = "sandbox-tf"
@@ -192,6 +195,26 @@ def require_approved(rule_id):
         raise HTTPException(status_code=403, detail=f"{rule_id} approval is pending; apply and rollback are not allowed")
 
 
+def load_plain_text():
+    """Plain-language fields per CLD finding from vulns/manifest.yaml. Empty dict on any read error."""
+    try:
+        with MANIFEST.open(encoding="utf-8") as fh:
+            manifest = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError):
+        return {}
+    if not isinstance(manifest, list):
+        return {}
+    plain = {}
+    for entry in manifest:
+        if not isinstance(entry, dict):
+            continue
+        finding_id = entry.get("id")
+        if not isinstance(finding_id, str) or not RULE_ID_RE.fullmatch(finding_id):
+            continue
+        plain[finding_id] = {k: entry[k] for k in PLAIN_FIELDS if k in entry}
+    return plain
+
+
 def acquire_job():
     if not job_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="Another scan or remediation is already running")
@@ -202,6 +225,11 @@ def index():
     return FileResponse(INDEX_HTML, media_type="text/html")
 
 
+@app.get("/simple")
+def simple():
+    return FileResponse(SIMPLE_HTML, media_type="text/html")
+
+
 @app.get("/api/data")
 def data():
     if not DASHBOARD_DATA.is_file():
@@ -209,7 +237,15 @@ def data():
             status_code=404,
             detail="results/dashboard-data.json not found. Run: py -3.13 reports/build_dashboard_data.py",
         )
-    return FileResponse(DASHBOARD_DATA, media_type="application/json")
+    try:
+        with DASHBOARD_DATA.open(encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read dashboard data: {exc}") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="Dashboard data is not a JSON object")
+    payload["plain"] = load_plain_text()
+    return payload
 
 
 @app.get("/api/history/findings")
