@@ -92,7 +92,7 @@ Before the target is built, Terraform sets up an SCP that blocks public IPs, int
 
 The Terraform stack in terraform/03-vuln-instance builds the vulnerable target from scratch. It is the reset path: running terraform apply there rebuilds the intentionally vulnerable state, undoing the remediations applied by the engine.
 
-Remediation changes (security group revokes, metadata option, monitoring, and the IAM policy removal) are made outside Terraform state, so a Terraform apply overwrites them. A `terraform apply` in this stack undoes every remediation: it recreates the open security group rules, the IAM policy, and the metadata and monitoring settings, and it replaces the instance. The audit log in results/remediation-log.jsonl records every change made, and the scanner output in results/ shows the current state. Run `terraform plan` first to see exactly what it will change.
+The engine makes its changes outside Terraform state, so none of them survive the apply: it recreates the open security group rules, the IAM policy, and the metadata and monitoring settings, and it replaces the instance. The audit log in results/remediation-log.jsonl records every change made, and the scanner output in results/ shows the current state. Run `terraform plan` first to see exactly what it will change.
 
 ## Dashboard
 
