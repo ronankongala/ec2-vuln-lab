@@ -1,5 +1,78 @@
 # ec2-vuln-lab
 
+## Pipeline
+
+The lab builds an intentionally vulnerable EC2 target, detects its weaknesses, remediates them through approved rules, verifies each fix independently, and records every action.
+
+### 1. Build the target
+
+Terraform creates a t3.micro in a private subnet with no internet route.
+
+![Lab resources, tagged by project](screenshots/04_tagged_resources.png)
+*Lab resources, tagged by project.*
+
+### 2. Baseline misconfigurations
+
+Terraform and the bootstrap script create the weaknesses.
+
+![IMDSv1 allowed](screenshots/05_ec2_imdsv1_before.png)
+*IMDSv1 allowed (CLD-01)*
+
+![SSH, MySQL and Redis open to 0.0.0.0/0](screenshots/06_sg_open_before.png)
+*SSH, MySQL and Redis open to 0.0.0.0/0 (CLD-02 to CLD-04)*
+
+![Weak OS settings](screenshots/07_session_manager_vulns.png)
+*Weak OS settings: password login, root login, SUID binary, 0777 cron script, auditd and firewalld off*
+
+### 3. Detect
+
+The scanner checks nine cloud findings.
+
+![Amazon Inspector findings](screenshots/09_inspector_findings.png)
+*Amazon Inspector findings, including CVEs on pinned packages (OS-10).*
+
+### 4. Remediate with rules
+
+Each finding maps to a rule file. Dry-run shows the plan with live output before any approval.
+
+![Dashboard dry-run streaming output](screenshots/11_dashboard_fix_all.png)
+*Dashboard dry-run streaming output before any change.*
+
+### 5. Verify the fix
+
+Each fix is re-checked by the same scanner check.
+
+![IMDSv2 now required](screenshots/12_ec2_imdsv2_after.png)
+*IMDSv2 now required*
+
+![Security group with no open world rules](screenshots/13_sg_locked_after.png)
+*Security group with no open world rules*
+
+### 6. Confirm on the host
+
+A read-only Systems Manager Run Command checks the OS settings after remediation.
+
+![Run Command output](screenshots/14_run_command_history.png)
+*Run Command output: OS settings checked on the instance.*
+
+### 7. Report and audit
+
+The dashboard shows 6 of 9 findings closed and 66.7% compliance. Every action is recorded in the audit log.
+
+![Dashboard after remediation](screenshots/15_dashboard_after.png)
+*Dashboard after remediation: 6 closed, 3 open*
+
+![Audit log](screenshots/16_audit_log.png)
+*Audit log: dry-run, apply and verify entries per rule*
+
+### Guardrails
+
+Before the target is built, Terraform sets up an SCP that blocks public IPs, internet gateways and public snapshots, a budget alarm, and a private VPC.
+
+| SCP | Budget alarm | Route table with no internet route |
+| --- | --- | --- |
+| ![SCP](screenshots/01_scp_attached.png) | ![Budget alarm](screenshots/02_budget_alarm.png) | ![Route table with no internet route](screenshots/03_vpc_route_table.png) |
+
 ## Resetting the lab
 
 The Terraform stack in terraform/03-vuln-instance builds the vulnerable target from scratch. It is the reset path: running terraform apply there rebuilds the intentionally vulnerable state, undoing the remediations applied by the engine.
