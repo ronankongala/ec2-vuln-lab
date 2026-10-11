@@ -46,7 +46,7 @@ SCANNER = ROOT / "scanner" / "cloud_checks.py"
 ENGINE = ROOT / "remediations" / "engine.py"
 BUILDER = ROOT / "reports" / "build_dashboard_data.py"
 MANIFEST = ROOT / "vulns" / "manifest.yaml"
-PLAIN_FIELDS = ("plain_title", "plain_wrong", "technical", "plain_why", "plain_fix", "plain_open")
+PLAIN_FIELDS = ("plain_title", "short_name", "plain_wrong", "technical", "plain_why", "plain_fix", "plain_open")
 
 HOST = "127.0.0.1"
 PROFILE = "sandbox-tf"

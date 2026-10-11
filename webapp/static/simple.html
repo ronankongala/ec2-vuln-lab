@@ -429,6 +429,7 @@
   }
   function topicOf(id) {
     var p = plainEntry(id);
+    if (p && hasText(p.short_name)) return " (" + p.short_name + ")";
     return p && hasText(p.plain_title) ? " (" + p.plain_title.toLowerCase() + ")" : "";
   }
 

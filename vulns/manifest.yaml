@@ -7,10 +7,11 @@
   how_to_fix: Set http_tokens to "required" and re-run terraform apply
   cis_or_nist: NIST SP 800-53 Rev 5 CM-6
   plain_title: "Old, less safe way of reading server settings"
+  short_name: "server settings"
   plain_wrong: "The server accepts an older, less safe way of asking for its own settings."
   technical: "Instance metadata allows IMDSv1 (HttpTokens = optional), so requests without a session token are accepted."
   plain_why: "Attackers can abuse the older method to steal the server's access keys."
-  plain_fix: "Now requires the safer way."
+  plain_fix: "Requires the safer, token-based way of reading settings."
 
 - id: CLD-02
   layer: cloud
@@ -21,6 +22,7 @@
   how_to_fix: Remove the 0.0.0.0/0 SSH rule, or restrict it to a management CIDR
   cis_or_nist: NIST SP 800-53 Rev 5 SC-7
   plain_title: "SSH login open to the internet"
+  short_name: "SSH"
   plain_wrong: "Anyone on the internet could try to log in over SSH."
   technical: "Security group vuln-lab-target-sg has an ingress rule for tcp/22 from 0.0.0.0/0."
   plain_why: "Login doors open to everyone are the first thing attackers try."
@@ -35,6 +37,7 @@
   how_to_fix: Remove the ingress rule and allow database access only from the application security group
   cis_or_nist: NIST SP 800-53 Rev 5 SC-7
   plain_title: "MySQL database open to the internet"
+  short_name: "MySQL"
   plain_wrong: "Anyone on the internet could reach the MySQL database."
   technical: "Security group vuln-lab-target-sg has an ingress rule for tcp/3306 (MySQL/MariaDB) from 0.0.0.0/0."
   plain_why: "Databases open to the internet can be read or broken into."
@@ -49,6 +52,7 @@
   how_to_fix: Remove the ingress rule and allow Redis only from the application security group
   cis_or_nist: NIST SP 800-53 Rev 5 SC-7
   plain_title: "Redis data store open to the internet"
+  short_name: "Redis"
   plain_wrong: "Anyone on the internet could reach the Redis data store."
   technical: "Security group vuln-lab-target-sg has an ingress rule for tcp/6379 (Redis, no auth, protected mode off) from 0.0.0.0/0."
   plain_why: "Redis without a password lets anyone read or change its data."
@@ -63,6 +67,7 @@
   how_to_fix: Enable account-level EBS encryption by default and recreate the volume encrypted
   cis_or_nist: NIST SP 800-53 Rev 5 SC-28
   plain_title: "Main disk not encrypted"
+  short_name: "disk encryption"
   plain_wrong: "The main disk is not encrypted."
   technical: "Root EBS volume is unencrypted (Encrypted = False). Encryption cannot be turned on in place, so the volume must be recreated."
   plain_why: "If the disk is copied, its data can be read."
@@ -77,10 +82,11 @@
   how_to_fix: Replace with a least-privilege policy scoped to the specific bucket and actions needed
   cis_or_nist: NIST SP 800-53 Rev 5 AC-6
   plain_title: "Server allowed to do anything with storage"
+  short_name: "storage permission"
   plain_wrong: "The server was allowed to do anything with storage."
   technical: "IAM inline policy overly-permissive-s3 on the instance role grants s3:* on Resource *."
   plain_why: "A broken server could then read or delete every stored file."
-  plain_fix: "Removes that permission."
+  plain_fix: "Removes the permission that let the server access all stored files."
 
 - id: CLD-07
   layer: cloud
@@ -91,6 +97,7 @@
   how_to_fix: Move the secret to Secrets Manager or SSM Parameter Store and remove it from user data
   cis_or_nist: NIST SP 800-53 Rev 5 IA-5
   plain_title: "Database password in the startup script"
+  short_name: "startup-script password"
   plain_wrong: "A database password is written in plain text in the startup script."
   technical: "The instance user data exports a database admin password as plain text. The value is not shown here."
   plain_why: "Anyone who can read the startup script gets the password."
@@ -105,6 +112,7 @@
   how_to_fix: Create a flow log to CloudWatch Logs or S3 capturing all traffic
   cis_or_nist: NIST SP 800-53 Rev 5 AU-12
   plain_title: "Network traffic not recorded"
+  short_name: "network logging"
   plain_wrong: "Network traffic is not being recorded."
   technical: "The VPC has no flow log, so no network traffic metadata is recorded to CloudWatch Logs or S3."
   plain_why: "Without records, an attack leaves no trail to investigate."
@@ -119,10 +127,11 @@
   how_to_fix: Enable detailed monitoring on the instance
   cis_or_nist: NIST SP 800-53 Rev 5 SI-4
   plain_title: "Detailed monitoring off"
+  short_name: "monitoring"
   plain_wrong: "Detailed monitoring was off."
   technical: "Detailed monitoring is off (1-minute metrics disabled), so CloudWatch samples only every 5 minutes."
   plain_why: "Slower monitoring means problems are spotted later."
-  plain_fix: "Turned on."
+  plain_fix: "Turns on detailed monitoring for the server."
 
 - id: OS-01
   layer: os
