@@ -228,5 +228,104 @@ class DryRunTests(unittest.TestCase):
         self.assertEqual(set(engine.HANDLERS), set(engine.DESIRED_STATE))
 
 
+def sg_responses():
+    sg = {
+        "GroupId": "sg-0123", "OwnerId": ACCOUNT, "Tags": GOOD_TAGS,
+        "IpPermissions": [{"IpProtocol": "tcp", "FromPort": 22, "ToPort": 22,
+                           "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}],
+    }
+    return responses(describe_security_groups={"SecurityGroups": [sg]})
+
+
+class DraftTests(unittest.TestCase):
+    """Draft rules. Drafts are written to a temporary folder patched in as DRAFTS_DIR."""
+
+    # Shared with DryRunTests without inheriting (and re-running) its tests.
+    tearDown = DryRunTests.tearDown
+    _hash_rules = staticmethod(DryRunTests._hash_rules)
+    _factory = DryRunTests._factory
+    _audit_entries = DryRunTests._audit_entries
+    _assert_read_only = DryRunTests._assert_read_only
+
+    def setUp(self):
+        DryRunTests.setUp(self)
+        self.drafts_dir = (Path(self.tmp.name) / "drafts").resolve()
+        self.drafts_dir.mkdir()
+        patcher = mock.patch.object(engine, "DRAFTS_DIR", self.drafts_dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # Any real AWS session would be a test failure.
+        patcher = mock.patch.object(engine, "Aws", side_effect=AssertionError("real AWS used"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write_draft(self, folder, **overrides):
+        source = engine.ENGINE_DIR / "drafts" / "CLD-02.draft.yaml"
+        draft = engine.yaml.safe_load(source.read_text(encoding="utf-8"))
+        draft.update(overrides)
+        path = folder / "CLD-02.draft.yaml"
+        path.write_text(engine.yaml.safe_dump(draft, sort_keys=False), encoding="utf-8")
+        return path
+
+    def _main(self, *args, resp=None):
+        real_dry_run = engine.run_dry_run
+
+        def dry_run(rule, profile, region):
+            return real_dry_run(rule, profile, region, self._factory(resp or responses()))
+
+        out = io.StringIO()
+        with mock.patch.object(sys, "argv", ["engine.py", *args]), \
+                mock.patch.object(engine, "run_dry_run", dry_run), \
+                contextlib.redirect_stdout(out):
+            code = engine.main()
+        return code, out.getvalue()
+
+    def test_apply_refuses_draft_even_when_approved(self):
+        path = self._write_draft(self.drafts_dir, approved_by="ronan", approved_on="2026-10-11")
+        code, out = self._main("--apply", path.as_posix())
+        self.assertEqual(code, engine.EXIT_REFUSED)
+        self.assertIn(engine.DRAFT_MESSAGE, out)
+        self.assertFalse(self.factory_used)
+        self.assertEqual(self.calls, [])
+        entries = self._audit_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["mode"], "apply")
+        self.assertEqual(entries[0]["result"], "refused")
+        self.assertEqual(entries[0]["detail"], {"reason": "draft"})
+
+    def test_dry_run_works_on_draft(self):
+        path = self._write_draft(self.drafts_dir)
+        code, out = self._main("--dry-run", path.as_posix(), resp=sg_responses())
+        self.assertEqual(code, engine.EXIT_OK)
+        self.assertIn(engine.DRAFT_MESSAGE, out)
+        self.assertIn("would change", out)
+        self.assertTrue(self.factory_used)
+        self._assert_read_only()
+        entries = self._audit_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["mode"], "dry-run")
+        self.assertEqual(entries[0]["result"], "planned")
+
+    def test_ai_approver_counts_as_pending(self):
+        rule = dict(self.rules["CLD-01"], approved_by="ai")
+        self.assertTrue(engine.is_pending(rule))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = engine.run_rule(rule, "apply", "test-profile", "us-east-1")
+        self.assertEqual(code, engine.EXIT_REFUSED)
+        self.assertIn("approval pending", out.getvalue())
+        self.assertEqual(self._audit_entries()[0]["result"], "skipped")
+
+    def test_dry_run_rejects_draft_outside_drafts_dir(self):
+        other = Path(self.tmp.name) / "elsewhere"
+        other.mkdir()
+        path = self._write_draft(other)
+        with self.assertRaises(SystemExit) as ctx:
+            self._main("--dry-run", path.as_posix())
+        self.assertIn("drafts are only read from", str(ctx.exception.code))
+        self.assertFalse(self.factory_used)
+        self.assertFalse(self.audit_log.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
