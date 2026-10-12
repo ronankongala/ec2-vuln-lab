@@ -8,6 +8,7 @@ import copy
 import hashlib
 import io
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -17,6 +18,11 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "remediations"))
 
 import engine  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webapp"))
+
+import server  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
 ACCOUNT = engine.ALLOWED_ACCOUNT
 GOOD_TAGS = [{"Key": "Project", "Value": "ec2-vuln-lab"}]
@@ -554,6 +560,102 @@ class HandlerTests(unittest.TestCase):
         rule = copy.deepcopy(self.rules["CLD-01"])
         rule["scope"]["allowed_actions"].append("ec2:TerminateInstances")
         self._assert_refused_before_aws(rule, "scope.allowed_actions lists ec2:TerminateInstances")
+
+
+# CLD-09 has its rule file removed in ServerFullDraftTests, so the server drafts it from scratch.
+SCRATCH_ID = "CLD-09"
+
+
+def full_draft_step(action="ec2:MonitorInstances", target_type="instance", name="vuln-lab-target"):
+    return {"action": action, "target": {"type": target_type, "name": name}, "params": {}}
+
+
+def full_draft_reply(fix_step=None, check="check_cld09", allowed=None):
+    """A stubbed model reply for a full draft. Valid unless an argument changes it."""
+    fix_step = fix_step or full_draft_step()
+    reply = {
+        "match": {"check": check},
+        "scope": {"allowed_actions": allowed or [fix_step["action"], "ec2:UnmonitorInstances"],
+                  "account": "111111111111"},
+        "fix": {"type": "automated", "description": "Enable detailed monitoring.", "steps": [fix_step]},
+        "rollback": {"description": "Disable detailed monitoring.",
+                     "steps": [full_draft_step("ec2:UnmonitorInstances")]},
+        "verify": {"check": check, "expect": "closed"},
+    }
+    return engine.yaml.safe_dump(reply, sort_keys=False)
+
+
+class ServerFullDraftTests(unittest.TestCase):
+    """POST /api/drafts for a finding with no approved rule. The model reply is stubbed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.rule_hashes = DryRunTests._hash_rules()
+        tmp = Path(self.tmp.name)
+        rules_dir = tmp / "rules"
+        rules_dir.mkdir()
+        for path in engine.RULES_DIR.glob("*.yaml"):
+            if path.stem != SCRATCH_ID:
+                shutil.copy(path, rules_dir / path.name)
+        self.drafts_dir = tmp / "drafts"
+        self.request_draft = mock.Mock()
+        settings = {"DRAFT_API_BASE": "https://model.invalid/v1", "DRAFT_API_KEY": "k", "DRAFT_MODEL": "m"}
+        for target, value in [(server, {"RULES_DIR": rules_dir}),
+                              (server, {"DRAFTS_DIR": self.drafts_dir}),
+                              (server, {"load_draft_settings": mock.Mock(return_value=settings)}),
+                              (server, {"request_draft": self.request_draft}),
+                              (server.urllib.request, {"urlopen": mock.Mock(side_effect=AssertionError("real model call"))})]:
+            patcher = mock.patch.multiple(target, **value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.client = TestClient(server.app)
+
+    def tearDown(self):
+        self.assertEqual(self.rule_hashes, DryRunTests._hash_rules(), "a rule file was modified")
+
+    def _post(self, reply):
+        self.request_draft.return_value = reply
+        resp = self.client.post(f"/api/drafts/{SCRATCH_ID}")
+        self.request_draft.assert_called_once()
+        return resp
+
+    def _assert_rejected(self, reply, text):
+        resp = self._post(reply)
+        self.assertEqual(resp.status_code, 422, resp.text)
+        self.assertIn(text, resp.json()["detail"])
+        self.assertFalse(self.drafts_dir.exists(), "a rejected draft was saved")
+
+    def test_rejects_action_not_on_engine_allowed_list(self):
+        step = full_draft_step("ec2:StopInstances")
+        self._assert_rejected(full_draft_reply(step, allowed=["ec2:UnmonitorInstances"]),
+                              "fix.steps[0] action 'ec2:StopInstances' is not on the engine's allowed list")
+
+    def test_rejects_target_outside_lab(self):
+        self._assert_rejected(full_draft_reply(full_draft_step(name="prod-web-server")),
+                              "target instance prod-web-server is not a lab resource tagged Project=ec2-vuln-lab")
+
+    def test_rejects_unknown_verify_check(self):
+        self._assert_rejected(full_draft_reply(check="check_cld99"),
+                              "verify.check 'check_cld99' is not a check in scanner/cloud_checks.py")
+
+    def test_rejects_forbidden_action(self):
+        step = full_draft_step("ec2:TerminateInstances")
+        self._assert_rejected(full_draft_reply(step, allowed=["ec2:UnmonitorInstances"]),
+                              "action ec2:TerminateInstances is forbidden by the engine")
+
+    def test_valid_draft_saved_as_pending_and_not_applied(self):
+        resp = self._post(full_draft_reply())
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        self.assertIs(body["applied"], False)
+        self.assertEqual(body["path"], f"remediations/drafts/{SCRATCH_ID}.draft.yaml")
+        saved = engine.yaml.safe_load((self.drafts_dir / f"{SCRATCH_ID}.draft.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(saved, body["draft"])
+        self.assertIs(saved["draft"], True)
+        self.assertEqual(saved["approved_by"], "pending")
+        self.assertEqual(saved["scope"]["account"], "145443243505")
+        self.assertEqual(saved["scope"]["allowed_actions"], ["ec2:MonitorInstances", "ec2:UnmonitorInstances"])
 
 
 if __name__ == "__main__":

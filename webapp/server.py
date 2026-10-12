@@ -21,7 +21,9 @@ Usage:
 """
 
 import argparse
+import ast
 import copy
+import importlib.util
 import json
 import os
 import queue
@@ -88,6 +90,47 @@ rollback:
   extra_steps: []
 """
 DRAFT_STEP_KEYS = {"action", "target", "params"}
+
+# Used when no approved rule exists and the model writes the whole draft. The
+# server still sets scope.account, scope.tags, id, version, and every safety
+# field itself, and validates the rest against the engine and the scanner.
+LAB_ACCOUNT = "145443243505"
+LAB_TAGS = {"Project": "ec2-vuln-lab"}
+FULL_DRAFT_KEYS = ("match", "scope", "fix", "rollback", "verify")
+FULL_DRAFT_REPLY_TEMPLATE = """\
+match:
+  check: <scanner check name>
+
+scope:
+  allowed_actions:
+    - <every action used in fix.steps and rollback.steps>
+
+fix:
+  type: <automated or manual>
+  description: >-
+    <what the fix changes and what it does not affect>
+  steps:
+    - action: <allowed action>
+      target:
+        type: <target type for that action>
+        name: <target name from the list>
+      params: {}
+
+rollback:
+  description: >-
+    <how the rollback restores the original state>
+  steps:
+    - action: <allowed action>
+      target:
+        type: <target type for that action>
+        name: <target name from the list>
+      params: {}
+
+verify:
+  check: <scanner check name>
+  expect: closed
+"""
+VERIFY_EXPECT = ("closed", "open")
 
 # Only one AWS-touching job at a time, so a scan never races an apply.
 job_lock = threading.Lock()
@@ -682,16 +725,18 @@ def reply_extra_steps(parsed, section, rule):
     return accepted
 
 
-@app.post("/api/drafts/{finding_id}")
-def create_draft(finding_id: str):
-    """Ask the configured model for draft wording and save it to remediations/drafts/. Never applies it."""
-    if not RULE_ID_RE.fullmatch(finding_id):
-        raise HTTPException(status_code=400, detail="finding_id must match ^CLD-0[1-9]$")
-    if not (RULES_DIR / f"{finding_id}.yaml").is_file():
-        raise HTTPException(
-            status_code=404,
-            detail=f"No approved rule remediations/rules/{finding_id}.yaml; a draft needs an approved rule to copy from",
-        )
+def parse_reply(reply):
+    try:
+        parsed = yaml.safe_load(strip_code_fence(reply))
+    except yaml.YAMLError:
+        raise HTTPException(status_code=422, detail="Model reply is not valid YAML") from None
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=422, detail="Model reply is not a YAML mapping")
+    return parsed
+
+
+def draft_from_rule(finding_id):
+    """Draft for a finding with an approved rule: structure from the rule, wording from the model."""
     rule = load_rule(finding_id)
     check_approved_rule_shape(finding_id, rule)
     settings = load_draft_settings()
@@ -699,12 +744,7 @@ def create_draft(finding_id: str):
     system, user = build_draft_prompt(finding_id, load_finding_text(finding_id), rule)
     reply = request_draft(settings, system, user)
 
-    try:
-        parsed = yaml.safe_load(strip_code_fence(reply))
-    except yaml.YAMLError:
-        raise HTTPException(status_code=422, detail="Model reply is not valid YAML") from None
-    if not isinstance(parsed, dict):
-        raise HTTPException(status_code=422, detail="Model reply is not a YAML mapping")
+    parsed = parse_reply(reply)
     fix_description = reply_text(parsed, "fix")
     rollback_description = reply_text(parsed, "rollback")
     fix_extra = reply_extra_steps(parsed, "fix", rule)
@@ -718,7 +758,7 @@ def create_draft(finding_id: str):
     rollback = {k: copy.deepcopy(v) for k, v in rule["rollback"].items() if k not in ("description", "steps")}
     rollback["description"] = rollback_description
     rollback["steps"] = copy.deepcopy(rule["rollback"]["steps"]) + rollback_extra
-    draft = {
+    return {
         "id": rule["id"],
         "version": copy.deepcopy(rule["version"]),
         "match": copy.deepcopy(rule["match"]),
@@ -727,6 +767,407 @@ def create_draft(finding_id: str):
         "rollback": rollback,
         "verify": copy.deepcopy(rule["verify"]),
     }
+
+
+def load_engine():
+    """Load remediations/engine.py fresh from disk under a private name. Makes no AWS calls."""
+    name = f"_draft_engine_{threading.get_ident()}"
+    spec = importlib.util.spec_from_file_location(name, ENGINE)
+    if spec is None or spec.loader is None:
+        raise HTTPException(status_code=500, detail="Could not load remediations/engine.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not load remediations/engine.py: {type(exc).__name__}") from None
+    finally:
+        sys.modules.pop(name, None)
+    return module
+
+
+def parse_source(path, label):
+    try:
+        return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read {label}: {type(exc).__name__}") from None
+
+
+def module_assign(tree, name):
+    """The value node of a module-level `name = ...` assignment, or None."""
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            return node.value
+    return None
+
+
+def is_str_const(node):
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+
+def params_keys(node, funcs, str_tuples, seen):
+    """Keys a handler reads from params. params["X"] is required; params.get("X") and keys
+    copied from a module-level tuple are optional. Follows calls to module functions."""
+    required, optional = set(), set()
+    for sub in ast.walk(node):
+        if (isinstance(sub, ast.Subscript) and isinstance(sub.value, ast.Name)
+                and sub.value.id == "params" and is_str_const(sub.slice)):
+            required.add(sub.slice.value)
+        elif (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute) and sub.func.attr == "get"
+                and isinstance(sub.func.value, ast.Name) and sub.func.value.id == "params"
+                and sub.args and is_str_const(sub.args[0])):
+            optional.add(sub.args[0].value)
+        elif isinstance(sub, ast.comprehension) and isinstance(sub.iter, ast.Name) and sub.iter.id in str_tuples:
+            optional.update(str_tuples[sub.iter.id])
+        elif (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+                and sub.func.id in funcs and sub.func.id not in seen):
+            seen.add(sub.func.id)
+            r, o = params_keys(funcs[sub.func.id], funcs, str_tuples, seen)
+            required |= r
+            optional |= o
+    return required, optional
+
+
+def refusal_messages(func):
+    """Plain-text messages of the Refused(...) calls in one engine check function."""
+    return [
+        sub.args[0].value
+        for sub in ast.walk(func)
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id == "Refused"
+        and sub.args and is_str_const(sub.args[0])
+    ]
+
+
+def load_engine_policy():
+    """Allowed actions with their target types and params, and lab target names.
+
+    Read from remediations/engine.py, scanner/cloud_checks.py, and the approved
+    rules at request time.
+    """
+    engine = load_engine()
+    if str(engine.ALLOWED_ACCOUNT) != LAB_ACCOUNT or dict(engine.REQUIRED_TAGS) != LAB_TAGS:
+        raise HTTPException(status_code=500, detail="engine.py account or required tags do not match the lab")
+    tree = parse_source(ENGINE, "remediations/engine.py")
+    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    str_tuples = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple)
+                and all(is_str_const(e) for e in node.value.elts)):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    str_tuples[t.id] = [e.value for e in node.value.elts]
+    handlers_node = module_assign(tree, "HANDLERS")
+    if not isinstance(handlers_node, ast.Dict):
+        raise HTTPException(status_code=500, detail="Could not find HANDLERS in remediations/engine.py")
+    fields = engine.Handler._fields
+    reader_fields = [fields.index(f) for f in ("build_call", "read", "is_done")]
+
+    actions = {}
+    for key_node, value_node in zip(handlers_node.keys, handlers_node.values):
+        if not is_str_const(key_node) or not isinstance(value_node, ast.Call):
+            continue
+        action = key_node.value
+        if action not in engine.HANDLERS or engine.forbidden_reason(action):
+            continue
+        required, optional = set(), set()
+        for idx in reader_fields:
+            if idx >= len(value_node.args):
+                continue
+            arg = value_node.args[idx]
+            node = funcs.get(arg.id) if isinstance(arg, ast.Name) else arg
+            if node is not None:
+                r, o = params_keys(node, funcs, str_tuples, set())
+                required |= r
+                optional |= o
+        notes = []
+        check = engine.STEP_CHECKS.get(action)
+        if check is not None and check.__name__ in funcs:
+            r, o = params_keys(funcs[check.__name__], funcs, str_tuples, set())
+            optional |= r | o
+            notes.extend(refusal_messages(funcs[check.__name__]))
+        if action == "ssm:SendCommand":
+            notes.append(f"params.Command must be one of: {', '.join(engine.SSM_COMMANDS)}. No other params.")
+        actions[action] = {
+            "target_type": engine.HANDLERS[action].target_type,
+            "required": sorted(required),
+            "optional": sorted(optional - required),
+            "notes": notes,
+        }
+    if not actions:
+        raise HTTPException(status_code=500, detail="remediations/engine.py lists no allowed actions")
+    return {"engine": engine, "actions": actions, "lab_names": lab_target_names(engine)}
+
+
+def lab_target_names(engine):
+    """Target names a full draft may use, by target type.
+
+    The IAM role and VPC are the engine's LAB_ROLE_NAME and LAB_VPC_NAME. The
+    instance is the scanner's TAG_NAME, which it finds by tag Project=ec2-vuln-lab.
+    Other names come from targets in approved rules, which already pass the
+    engine's account and Project=ec2-vuln-lab tag checks. The server cannot read
+    live tags, so the engine checks them again at dry-run.
+    """
+    names = {t: set() for t in engine.RESOLVERS}
+    names["iam_role"] = {engine.LAB_ROLE_NAME}
+    names["vpc"] = {engine.LAB_VPC_NAME}
+    instance_name = module_assign(parse_source(SCANNER, "scanner/cloud_checks.py"), "TAG_NAME")
+    if is_str_const(instance_name):
+        names["instance"].add(instance_name.value)
+    for path in sorted(RULES_DIR.glob("*.yaml")):
+        try:
+            with path.open(encoding="utf-8") as fh:
+                rule = yaml.safe_load(fh)
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(rule, dict):
+            continue
+        for section in ("fix", "rollback"):
+            part = rule.get(section)
+            steps = part.get("steps") if isinstance(part, dict) else None
+            for step in steps if isinstance(steps, list) else []:
+                target = step.get("target") if isinstance(step, dict) else None
+                if not isinstance(target, dict):
+                    continue
+                kind, name = target.get("type"), target.get("name")
+                if kind in names and kind not in ("iam_role", "vpc") and isinstance(name, str) and name:
+                    names[kind].add(name)
+    return names
+
+
+def load_check_names():
+    """Function names in the scanner's CHECKS list, read from scanner/cloud_checks.py."""
+    tree = parse_source(SCANNER, "scanner/cloud_checks.py")
+    defined = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+    checks_node = module_assign(tree, "CHECKS")
+    names = []
+    if isinstance(checks_node, (ast.List, ast.Tuple)):
+        for entry in checks_node.elts:
+            if (isinstance(entry, ast.Tuple) and len(entry.elts) == 2
+                    and isinstance(entry.elts[1], ast.Name) and entry.elts[1].id in defined):
+                names.append(entry.elts[1].id)
+    if not names:
+        raise HTTPException(status_code=500, detail="Could not read check names from scanner/cloud_checks.py")
+    return names
+
+
+def build_full_draft_prompt(finding_id, finding, policy, check_names):
+    title = scrub_prompt_text(finding.get("title", "")) or "(not available)"
+    control = scrub_prompt_text(finding.get("cis_or_nist", "")) or "(not available)"
+    action_lines = []
+    for action, spec in policy["actions"].items():
+        action_lines.append(f"- {action} (target type {spec['target_type']})")
+        action_lines.append(f"    required params: {', '.join(spec['required']) or '(none)'}")
+        if spec["optional"]:
+            action_lines.append(f"    optional params: {', '.join(spec['optional'])}")
+        for note in spec["notes"]:
+            action_lines.append(f"    rule: {note}")
+    actions = "\n".join(action_lines)
+    targets = "\n".join(
+        f"- {kind} {name}" for kind, found in policy["lab_names"].items() for name in sorted(found)
+    ) or "(none)"
+    checks = "\n".join(f"- {c}" for c in check_names)
+    system = (
+        "You write remediation rules for a security lab. Reply with YAML only. "
+        "Do not add commentary, explanations, or Markdown code fences."
+    )
+    user = (
+        f"Write a complete remediation rule draft for finding {finding_id}. No approved rule exists for it.\n\n"
+        f"Finding title: {title}\n"
+        f"Control: {control}\n\n"
+        "Use only these actions. Any other action is rejected. Each action lists its target type "
+        f"and the params it needs:\n{actions}\n\n"
+        f"Steps may target only these resources (type name):\n{targets}\n"
+        "An ec2:DeleteVolume step may also target a volume that an ec2:CreateVolume step in this draft "
+        "creates, by its VolumeName.\n\n"
+        f"verify.check and match.check must be one of these scanner checks:\n{checks}\n\n"
+        "The server sets scope.account and scope.tags. Do not write them.\n"
+        "scope.allowed_actions must list every action used in fix.steps and rollback.steps.\n"
+        "fix.type is automated or manual. A manual fix has empty fix.steps and rollback.steps and "
+        "explains the work in the descriptions.\n"
+        "Each step needs action, target (type and name), and params. Write params: {} when an action needs none.\n"
+        "rollback.steps must undo fix.steps.\n\n"
+        "Use exactly this YAML shape with these top-level keys and no others: "
+        f"{', '.join(FULL_DRAFT_KEYS)}. Replace each <placeholder>:\n\n"
+        f"{FULL_DRAFT_REPLY_TEMPLATE}\n"
+        "Output the YAML document only."
+    )
+    # Second pass over the finished text, in case anything slipped through.
+    return scrub_prompt_text(system), scrub_prompt_text(user)
+
+
+def reject(where, message):
+    prefix = f"Model reply {where}" if where else "Model reply"
+    raise HTTPException(status_code=422, detail=f"{prefix} {message}")
+
+
+def reply_section(parsed, section, allowed_keys):
+    part = parsed.get(section)
+    if not isinstance(part, dict):
+        reject(section, "is not a mapping")
+    unknown = sorted(str(k) for k in part if k not in allowed_keys)
+    if unknown:
+        reject(section, f"has unknown keys: {', '.join(unknown)}")
+    return part
+
+
+def created_volume_names(parsed):
+    """VolumeName of every ec2:CreateVolume step in the reply. The engine tags these Project=ec2-vuln-lab."""
+    found = set()
+    for section in ("fix", "rollback"):
+        part = parsed.get(section)
+        steps = part.get("steps") if isinstance(part, dict) else None
+        for step in steps if isinstance(steps, list) else []:
+            if isinstance(step, dict) and step.get("action") == "ec2:CreateVolume":
+                params = step.get("params")
+                name = params.get("VolumeName") if isinstance(params, dict) else None
+                if isinstance(name, str) and name:
+                    found.add(name)
+    return found
+
+
+def full_reply_steps(part, section, policy, lab_names):
+    """Steps from a full draft, each checked against the engine's allowed actions and the lab targets."""
+    engine = policy["engine"]
+    steps = part.get("steps")
+    if not isinstance(steps, list):
+        reject(f"{section}.steps", "is not a list")
+    accepted = []
+    for i, step in enumerate(steps):
+        where = f"{section}.steps[{i}]"
+        if not isinstance(step, dict):
+            reject(where, "is not a mapping")
+        unknown = sorted(str(k) for k in step if k not in DRAFT_STEP_KEYS)
+        if unknown:
+            reject(where, f"has unknown keys: {', '.join(unknown)}")
+        missing = sorted(DRAFT_STEP_KEYS - set(step))
+        if missing:
+            reject(where, f"is missing {', '.join(missing)}")
+        action = step["action"]
+        if not isinstance(action, str):
+            reject(where, "action is not text")
+        reason = engine.forbidden_reason(action)
+        if reason:
+            reject(where, f"action {action} is forbidden by the engine: {reason}")
+        spec = policy["actions"].get(action)
+        if spec is None:
+            reject(where, f"action {action!r} is not on the engine's allowed list")
+        target = step["target"]
+        if (not isinstance(target, dict) or set(target) != {"type", "name"}
+                or not all(isinstance(target[k], str) and target[k] for k in ("type", "name"))):
+            reject(where, "target must have only type and name, both text")
+        if target["type"] != spec["target_type"]:
+            reject(where, f"action {action} needs target type {spec['target_type']}, not {target['type']}")
+        if target["name"] not in lab_names.get(target["type"], ()):
+            reject(where, f"target {target['type']} {target['name']} is not a lab resource tagged Project=ec2-vuln-lab")
+        params = step["params"]
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            reject(where, "params is not a mapping")
+        missing_params = [p for p in spec["required"] if p not in params]
+        if missing_params:
+            reject(where, f"params is missing {', '.join(missing_params)} for {action}")
+        accepted.append({
+            "action": action,
+            "target": {"type": target["type"], "name": target["name"]},
+            "params": copy.deepcopy(params),
+        })
+    return accepted
+
+
+def draft_from_scratch(finding_id):
+    """Draft for a finding with no approved rule. The model writes the whole rule; the server
+    validates every action, target, and check, and sets the scope itself."""
+    policy = load_engine_policy()
+    check_names = load_check_names()
+    settings = load_draft_settings()
+    engine = policy["engine"]
+
+    system, user = build_full_draft_prompt(finding_id, load_finding_text(finding_id), policy, check_names)
+    reply = request_draft(settings, system, user)
+
+    parsed = parse_reply(reply)
+    unknown = sorted(str(k) for k in parsed if k not in FULL_DRAFT_KEYS)
+    if unknown:
+        reject("", f"has unknown top-level keys: {', '.join(unknown)}")
+    missing = [k for k in FULL_DRAFT_KEYS if k not in parsed]
+    if missing:
+        reject("", f"is missing top-level keys: {', '.join(missing)}")
+
+    verify_part = reply_section(parsed, "verify", ("check", "expect"))
+    verify_check = verify_part.get("check")
+    if verify_check not in check_names:
+        reject("verify.check", f"{verify_check!r} is not a check in scanner/cloud_checks.py")
+    expect = verify_part.get("expect", "closed")
+    if expect not in VERIFY_EXPECT:
+        reject("verify.expect", f"must be one of {', '.join(VERIFY_EXPECT)}")
+
+    match_part = parsed["match"]
+    if not isinstance(match_part, dict):
+        reject("match", "is not a mapping")
+    for key, value in match_part.items():
+        if not isinstance(key, str) or not isinstance(value, (str, int, float, bool)):
+            reject("match", "must map text keys to plain values")
+    match_check = match_part.get("check", verify_check)
+    if match_check not in check_names:
+        reject("match.check", f"{match_check!r} is not a check in scanner/cloud_checks.py")
+    match = {"source": "scanner/cloud_checks.py", "check": match_check}
+    match.update({k: v for k, v in match_part.items() if k not in match})
+
+    # scope.account and scope.tags from the model are ignored; the server sets them below.
+    scope_part = reply_section(parsed, "scope", ("allowed_actions", "account", "tags"))
+    listed = scope_part.get("allowed_actions") or []
+    if not isinstance(listed, list) or not all(isinstance(a, str) for a in listed):
+        reject("scope.allowed_actions", "is not a list of text")
+    for action in listed:
+        reason = engine.forbidden_reason(action)
+        if reason:
+            reject("scope.allowed_actions", f"lists {action}, which the engine forbids: {reason}")
+        if action not in policy["actions"]:
+            reject("scope.allowed_actions", f"lists {action!r}, which is not on the engine's allowed list")
+
+    fix_part = reply_section(parsed, "fix", ("type", "description", "steps"))
+    rollback_part = reply_section(parsed, "rollback", ("description", "steps"))
+    fix_type = fix_part.get("type")
+    if fix_type not in engine.FIX_TYPES:
+        reject("fix.type", f"must be one of {', '.join(engine.FIX_TYPES)}")
+    fix_description = reply_text(parsed, "fix")
+    rollback_description = reply_text(parsed, "rollback")
+
+    lab_names = {k: set(v) for k, v in policy["lab_names"].items()}
+    lab_names.setdefault("volume", set()).update(created_volume_names(parsed))
+    fix_steps = full_reply_steps(fix_part, "fix", policy, lab_names)
+    rollback_steps = full_reply_steps(rollback_part, "rollback", policy, lab_names)
+    if fix_type == "manual" and (fix_steps or rollback_steps):
+        reject("fix", "is manual, so fix.steps and rollback.steps must be empty")
+    if fix_type == "automated" and not fix_steps:
+        reject("fix.steps", "is empty for an automated fix")
+
+    used = []
+    for step in fix_steps + rollback_steps:
+        if step["action"] not in used:
+            used.append(step["action"])
+    draft = {
+        "id": finding_id,
+        "version": 1,
+        "match": match,
+        "scope": {"tags": dict(LAB_TAGS), "account": LAB_ACCOUNT, "allowed_actions": used},
+        "fix": {"type": fix_type, "description": fix_description, "steps": fix_steps},
+        "rollback": {"description": rollback_description, "steps": rollback_steps},
+        "verify": {"check": verify_check, "expect": expect},
+    }
+
+    # The engine's own static gates as well, so the draft would pass them at dry-run.
+    try:
+        engine.validate_steps(draft, fix_steps)
+        engine.validate_steps(draft, rollback_steps)
+    except engine.Refused as exc:
+        raise HTTPException(status_code=422, detail=f"Model reply refused by engine checks: {exc}") from None
+    return draft
+
+
+def save_draft(finding_id, draft):
+    """Add the safety fields and write the draft to remediations/drafts/<ID>.draft.yaml only."""
     draft.update({
         "draft": True,
         "drafted_by": "ai",
@@ -756,6 +1197,22 @@ def create_draft(finding_id: str):
         "draft": draft,
         "applied": False,
     }
+
+
+@app.post("/api/drafts/{finding_id}")
+def create_draft(finding_id: str):
+    """Ask the configured model for a draft and save it to remediations/drafts/. Never applies it.
+
+    With an approved rule, the model writes only the wording. Without one, the
+    model writes the whole draft and the server validates it before saving.
+    """
+    if not RULE_ID_RE.fullmatch(finding_id):
+        raise HTTPException(status_code=400, detail="finding_id must match ^CLD-0[1-9]$")
+    if (RULES_DIR / f"{finding_id}.yaml").is_file():
+        draft = draft_from_rule(finding_id)
+    else:
+        draft = draft_from_scratch(finding_id)
+    return save_draft(finding_id, draft)
 
 
 def main():
