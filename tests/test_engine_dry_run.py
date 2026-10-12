@@ -564,6 +564,8 @@ class HandlerTests(unittest.TestCase):
 
 # CLD-09 has its rule file removed in ServerFullDraftTests, so the server drafts it from scratch.
 SCRATCH_ID = "CLD-09"
+SG_PARAMS = {"IpProtocol": "tcp", "FromPort": 22, "ToPort": 22, "CidrIp": "0.0.0.0/0",
+             "Description": "lab ssh"}
 
 
 def full_draft_step(action="ec2:MonitorInstances", target_type="instance", name="vuln-lab-target"):
@@ -656,6 +658,36 @@ class ServerFullDraftTests(unittest.TestCase):
         self.assertEqual(saved["approved_by"], "pending")
         self.assertEqual(saved["scope"]["account"], "145443243505")
         self.assertEqual(saved["scope"]["allowed_actions"], ["ec2:MonitorInstances", "ec2:UnmonitorInstances"])
+
+    def _assert_target_accepted(self, step):
+        resp = self._post(full_draft_reply(step))
+        self.assertEqual(resp.status_code, 200, resp.text)
+        saved = engine.yaml.safe_load((self.drafts_dir / f"{SCRATCH_ID}.draft.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(saved["fix"]["steps"][0]["target"], step["target"])
+        return saved
+
+    def test_accepts_lab_security_group(self):
+        step = full_draft_step("ec2:RevokeSecurityGroupIngress", "security_group", "vuln-lab-target-sg")
+        step["params"] = SG_PARAMS
+        saved = self._assert_target_accepted(step)
+        self.assertEqual(saved["fix"]["steps"][0]["target"]["name"], "vuln-lab-target-sg")
+
+    def test_accepts_lab_role(self):
+        step = full_draft_step("iam:DeleteRolePolicy", "iam_role", "vuln-lab-target-role")
+        step["params"] = {"PolicyName": "lab-inline-policy"}
+        self._assert_target_accepted(step)
+
+    def test_accepts_lab_vpc(self):
+        self._assert_target_accepted(full_draft_step("ec2:CreateFlowLogs", "vpc", "vuln-lab-vpc"))
+
+    def test_accepts_lab_instance(self):
+        self._assert_target_accepted(full_draft_step("ec2:MonitorInstances", "instance", "vuln-lab-target"))
+
+    def test_rejects_security_group_outside_lab(self):
+        step = full_draft_step("ec2:RevokeSecurityGroupIngress", "security_group", "prod-db-sg")
+        step["params"] = SG_PARAMS
+        self._assert_rejected(full_draft_reply(step),
+                              "target security_group prod-db-sg is not a lab resource tagged Project=ec2-vuln-lab")
 
 
 if __name__ == "__main__":

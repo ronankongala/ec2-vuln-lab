@@ -96,6 +96,13 @@ DRAFT_STEP_KEYS = {"action", "target", "params"}
 # field itself, and validates the rest against the engine and the scanner.
 LAB_ACCOUNT = "145443243505"
 LAB_TAGS = {"Project": "ec2-vuln-lab"}
+# Lab resources a full draft may always target, by target type.
+LAB_TARGET_NAMES = {
+    "security_group": "vuln-lab-target-sg",
+    "iam_role": "vuln-lab-target-role",
+    "vpc": "vuln-lab-vpc",
+    "instance": "vuln-lab-target",
+}
 FULL_DRAFT_KEYS = ("match", "scope", "fix", "rollback", "verify")
 FULL_DRAFT_REPLY_TEMPLATE = """\
 match:
@@ -901,18 +908,15 @@ def load_engine_policy():
 def lab_target_names(engine):
     """Target names a full draft may use, by target type.
 
-    The IAM role and VPC are the engine's LAB_ROLE_NAME and LAB_VPC_NAME. The
-    instance is the scanner's TAG_NAME, which it finds by tag Project=ec2-vuln-lab.
-    Other names come from targets in approved rules, which already pass the
-    engine's account and Project=ec2-vuln-lab tag checks. The server cannot read
-    live tags, so the engine checks them again at dry-run.
+    The lab security group, IAM role, VPC, and instance in LAB_TARGET_NAMES are
+    accepted by name. Other names come from targets in approved rules, which
+    already pass the engine's account and Project=ec2-vuln-lab tag checks.
+    Anything else is rejected. The server cannot read live tags, so the engine
+    checks them again at dry-run.
     """
     names = {t: set() for t in engine.RESOLVERS}
-    names["iam_role"] = {engine.LAB_ROLE_NAME}
-    names["vpc"] = {engine.LAB_VPC_NAME}
-    instance_name = module_assign(parse_source(SCANNER, "scanner/cloud_checks.py"), "TAG_NAME")
-    if is_str_const(instance_name):
-        names["instance"].add(instance_name.value)
+    for kind, name in LAB_TARGET_NAMES.items():
+        names.setdefault(kind, set()).add(name)
     for path in sorted(RULES_DIR.glob("*.yaml")):
         try:
             with path.open(encoding="utf-8") as fh:
