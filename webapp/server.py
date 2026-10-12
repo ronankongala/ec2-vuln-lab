@@ -21,6 +21,7 @@ Usage:
 """
 
 import argparse
+import copy
 import json
 import os
 import queue
@@ -28,6 +29,8 @@ import re
 import subprocess
 import sys
 import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import uvicorn
@@ -46,6 +49,10 @@ SCANNER = ROOT / "scanner" / "cloud_checks.py"
 ENGINE = ROOT / "remediations" / "engine.py"
 BUILDER = ROOT / "reports" / "build_dashboard_data.py"
 MANIFEST = ROOT / "vulns" / "manifest.yaml"
+DRAFTS_DIR = ROOT / "remediations" / "drafts"
+DRAFT_ENV = WEBAPP_DIR / ".env"
+DRAFT_ENV_KEYS = ("DRAFT_API_BASE", "DRAFT_API_KEY", "DRAFT_MODEL")
+DRAFT_TIMEOUT_S = 300
 PLAIN_FIELDS = ("plain_title", "short_name", "plain_wrong", "technical", "plain_why", "plain_fix", "plain_open")
 
 HOST = "127.0.0.1"
@@ -55,6 +62,32 @@ RULE_ID_RE = re.compile(r"CLD-0[1-9]")
 SECRET_MARKERS = ("password", "secret", "token")
 SUMMARY_PREFIXES = ("Account ", "Totals:", "Wrote ", "Warning:")
 SUBPROCESS_TIMEOUT_S = 600
+
+# Identifiers that must never reach the drafting model. Each match is replaced
+# with a placeholder before the prompt is sent.
+PROMPT_SCRUBBERS = (
+    (re.compile(r"arn:aws[\w-]*:[^\s\"']*"), "<arn>"),
+    (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "<key>"),
+    (re.compile(r"\b(?:i|sg|sgr|vpc|subnet|ami|vol|eni|snap|igw|rtb|acl|vpce|fl)-[0-9a-f]{8,17}\b"), "<resource-id>"),
+    (re.compile(r"\b\d{12}\b"), "<account-id>"),
+    (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?\b"), "<ip>"),
+    (re.compile(r"(?<![\w:])(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}(?:/\d{1,3})?(?![\w:])"), "<ip>"),
+)
+
+# The only keys the drafting model may write. Every structural field of the
+# draft is copied from the approved rule by the server, not by the model.
+DRAFT_REPLY_TEMPLATE = """\
+fix:
+  description: >-
+    <what the fix changes and what it does not affect>
+  extra_steps: []
+
+rollback:
+  description: >-
+    <how the rollback restores the original state>
+  extra_steps: []
+"""
+DRAFT_STEP_KEYS = {"action", "target", "params"}
 
 # Only one AWS-touching job at a time, so a scan never races an apply.
 job_lock = threading.Lock()
@@ -429,6 +462,300 @@ def rollback(rule_id: str):
     validate_rule_id(rule_id)
     require_approved(rule_id)
     return run_engine("rollback", rule_id, rebuild=True)
+
+
+def load_draft_settings():
+    """Read DRAFT_* keys from webapp/.env. Raises 503 if any is missing."""
+    settings = {}
+    try:
+        with DRAFT_ENV.open(encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                if key.startswith("export "):
+                    key = key[len("export "):].strip()
+                if key in DRAFT_ENV_KEYS:
+                    settings[key] = value.strip().strip("\"'")
+    except OSError:
+        pass
+    missing = [k for k in DRAFT_ENV_KEYS if not settings.get(k)]
+    if missing:
+        raise HTTPException(
+            status_code=503,
+            detail=f"AI drafting is not configured: set {', '.join(missing)} in webapp/.env",
+        )
+    return settings
+
+
+def scrub_prompt_text(text):
+    """Drop secret-looking lines and replace account IDs, resource IDs, IPs, and ARNs."""
+    text = strip_secrets(str(text))
+    for pattern, placeholder in PROMPT_SCRUBBERS:
+        text = pattern.sub(placeholder, text)
+    return text.strip()
+
+
+def load_finding_text(finding_id):
+    """Title and control text for one finding from vulns/manifest.yaml, or {} if unavailable."""
+    try:
+        with MANIFEST.open(encoding="utf-8") as fh:
+            manifest = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError):
+        return {}
+    if not isinstance(manifest, list):
+        return {}
+    for entry in manifest:
+        if isinstance(entry, dict) and entry.get("id") == finding_id:
+            return {k: entry[k] for k in ("title", "cis_or_nist") if isinstance(entry.get(k), str)}
+    return {}
+
+
+def describe_steps(steps):
+    lines = []
+    for step in steps:
+        target = step.get("target") if isinstance(step.get("target"), dict) else {}
+        lines.append(f"- {step.get('action')} on {target.get('type')} {target.get('name')}")
+    return "\n".join(lines) or "(none)"
+
+
+def build_draft_prompt(finding_id, finding, rule):
+    title = scrub_prompt_text(finding.get("title", "")) or "(not available)"
+    control = scrub_prompt_text(finding.get("cis_or_nist", "")) or "(not available)"
+    allowed_actions = rule["scope"]["allowed_actions"]
+    actions = "\n".join(f"- {a}" for a in allowed_actions) or "(none: leave both extra_steps lists empty)"
+    targets = "\n".join(f"- {t} {n}" for t, n in rule_targets(rule)) or "(none)"
+    system = (
+        "You write the wording for remediation rules in a security lab. Reply with YAML only. "
+        "Do not add commentary, explanations, or Markdown code fences."
+    )
+    user = (
+        f"Write the descriptions for the remediation rule for finding {finding_id}.\n\n"
+        f"Finding title: {title}\n"
+        f"Control: {control}\n"
+        f"Fix type: {rule['fix']['type']}\n\n"
+        f"Fix steps (already fixed, do not repeat them):\n{describe_steps(rule['fix']['steps'])}\n\n"
+        f"Rollback steps (already fixed, do not repeat them):\n{describe_steps(rule['rollback']['steps'])}\n\n"
+        "Only add extra_steps if the steps above are not enough. Leave them as empty lists otherwise. "
+        "Each extra step needs action, target (type and name), and optional params.\n"
+        f"Extra steps may use only these actions:\n{actions}\n"
+        f"Extra steps may target only these resources (type name):\n{targets}\n\n"
+        "Use exactly this YAML shape and these keys, and no other keys. Replace each <placeholder>:\n\n"
+        f"{DRAFT_REPLY_TEMPLATE}\n"
+        "Output the YAML document only."
+    )
+    # Second pass over the finished text, in case anything slipped through.
+    return scrub_prompt_text(system), scrub_prompt_text(user)
+
+
+def request_draft(settings, system, user):
+    """Call the OpenAI-compatible chat completions endpoint. Returns the reply text."""
+    api_key = settings["DRAFT_API_KEY"]
+    url = settings["DRAFT_API_BASE"].rstrip("/") + "/chat/completions"
+    if not url.lower().startswith(("https://", "http://")):
+        raise HTTPException(status_code=503, detail="DRAFT_API_BASE must start with https:// or http://")
+    body = json.dumps({
+        "model": settings["DRAFT_MODEL"],
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+    )
+
+    def safe(message):
+        return strip_secrets(str(message).replace(api_key, "<redacted>"))
+
+    try:
+        with urllib.request.urlopen(req, timeout=DRAFT_TIMEOUT_S) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Model request failed with HTTP {exc.code}") from None
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail=f"Model request timed out after {DRAFT_TIMEOUT_S}s") from None
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise HTTPException(status_code=504, detail=f"Model request timed out after {DRAFT_TIMEOUT_S}s") from None
+        raise HTTPException(status_code=502, detail=safe(f"Model request failed: {exc.reason}")) from None
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=safe(f"Model request failed: {exc}")) from None
+    try:
+        content = payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise HTTPException(status_code=502, detail="Model reply had no choices[0].message.content") from None
+    if not isinstance(content, str):
+        raise HTTPException(status_code=502, detail="Model reply content was not text")
+    return content
+
+
+def strip_code_fence(text):
+    text = text.strip()
+    match = re.fullmatch(r"```[A-Za-z]*\n(.*?)\n?```", text, flags=re.DOTALL)
+    return match.group(1) if match else text
+
+
+def check_approved_rule_shape(rule_id, rule):
+    """The structural fields a draft copies must all be present in the approved rule."""
+    if rule.get("id") != rule_id:
+        raise HTTPException(status_code=500, detail=f"Rule {rule_id} has id {rule.get('id')!r}")
+    for key in ("version", "match", "scope", "fix", "rollback", "verify"):
+        if key not in rule:
+            raise HTTPException(status_code=500, detail=f"Rule {rule_id} has no {key}")
+    allowed = rule["scope"].get("allowed_actions") if isinstance(rule["scope"], dict) else None
+    if not isinstance(allowed, list) or not all(isinstance(a, str) for a in allowed):
+        raise HTTPException(status_code=500, detail=f"Rule {rule_id} scope.allowed_actions is not a list of strings")
+    if not isinstance(rule["fix"], dict) or "type" not in rule["fix"]:
+        raise HTTPException(status_code=500, detail=f"Rule {rule_id} has no fix.type")
+    for section in ("fix", "rollback"):
+        part = rule[section]
+        if not isinstance(part, dict) or not isinstance(part.get("steps"), list):
+            raise HTTPException(status_code=500, detail=f"Rule {rule_id} {section}.steps is not a list")
+        if not all(isinstance(s, dict) for s in part["steps"]):
+            raise HTTPException(status_code=500, detail=f"Rule {rule_id} {section}.steps has a non-mapping step")
+
+
+def rule_targets(rule):
+    """(type, name) of every step target in the approved rule, in first-seen order."""
+    found = []
+    for section in ("fix", "rollback"):
+        for step in rule[section]["steps"]:
+            target = step.get("target")
+            if isinstance(target, dict):
+                pair = (target.get("type"), target.get("name"))
+                if None not in pair and pair not in found:
+                    found.append(pair)
+    return found
+
+
+def reply_text(parsed, section):
+    part = parsed.get(section)
+    text = part.get("description") if isinstance(part, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(status_code=422, detail=f"Model reply has no {section}.description text")
+    return text.strip()
+
+
+def reply_extra_steps(parsed, section, rule):
+    """Extra steps from the model, accepted only with an in-scope action and a target from the approved rule."""
+    part = parsed.get(section)
+    steps = part.get("extra_steps") if isinstance(part, dict) else None
+    if steps is None:
+        return []
+    if not isinstance(steps, list):
+        raise HTTPException(status_code=422, detail=f"Model reply {section}.extra_steps is not a list")
+    allowed = set(rule["scope"]["allowed_actions"])
+    targets = rule_targets(rule)
+    accepted = []
+    for i, step in enumerate(steps):
+        where = f"{section}.extra_steps[{i}]"
+        if not isinstance(step, dict):
+            raise HTTPException(status_code=422, detail=f"Model reply {where} is not a mapping")
+        unknown = sorted(str(k) for k in step if k not in DRAFT_STEP_KEYS)
+        if unknown:
+            raise HTTPException(status_code=422, detail=f"Model reply {where} has unknown keys: {', '.join(unknown)}")
+        action = step.get("action")
+        if not isinstance(action, str) or action not in allowed:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Model reply {where} action {action!r} is not in scope.allowed_actions",
+            )
+        target = step.get("target")
+        pair = (target.get("type"), target.get("name")) if isinstance(target, dict) else None
+        if pair not in targets:
+            raise HTTPException(status_code=422, detail=f"Model reply {where} target is not a target in the approved rule")
+        params = step.get("params", {})
+        if not isinstance(params, dict):
+            raise HTTPException(status_code=422, detail=f"Model reply {where} params is not a mapping")
+        accepted.append({
+            "action": action,
+            "target": {"type": pair[0], "name": pair[1]},
+            "params": copy.deepcopy(params),
+        })
+    return accepted
+
+
+@app.post("/api/drafts/{finding_id}")
+def create_draft(finding_id: str):
+    """Ask the configured model for draft wording and save it to remediations/drafts/. Never applies it."""
+    if not RULE_ID_RE.fullmatch(finding_id):
+        raise HTTPException(status_code=400, detail="finding_id must match ^CLD-0[1-9]$")
+    if not (RULES_DIR / f"{finding_id}.yaml").is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"No approved rule remediations/rules/{finding_id}.yaml; a draft needs an approved rule to copy from",
+        )
+    rule = load_rule(finding_id)
+    check_approved_rule_shape(finding_id, rule)
+    settings = load_draft_settings()
+
+    system, user = build_draft_prompt(finding_id, load_finding_text(finding_id), rule)
+    reply = request_draft(settings, system, user)
+
+    try:
+        parsed = yaml.safe_load(strip_code_fence(reply))
+    except yaml.YAMLError:
+        raise HTTPException(status_code=422, detail="Model reply is not valid YAML") from None
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=422, detail="Model reply is not a YAML mapping")
+    fix_description = reply_text(parsed, "fix")
+    rollback_description = reply_text(parsed, "rollback")
+    fix_extra = reply_extra_steps(parsed, "fix", rule)
+    rollback_extra = reply_extra_steps(parsed, "rollback", rule)
+
+    # Every structural field comes from the approved rule. The model supplies
+    # only the two descriptions and any validated extra steps.
+    fix = {k: copy.deepcopy(v) for k, v in rule["fix"].items() if k not in ("description", "steps")}
+    fix["description"] = fix_description
+    fix["steps"] = copy.deepcopy(rule["fix"]["steps"]) + fix_extra
+    rollback = {k: copy.deepcopy(v) for k, v in rule["rollback"].items() if k not in ("description", "steps")}
+    rollback["description"] = rollback_description
+    rollback["steps"] = copy.deepcopy(rule["rollback"]["steps"]) + rollback_extra
+    draft = {
+        "id": rule["id"],
+        "version": copy.deepcopy(rule["version"]),
+        "match": copy.deepcopy(rule["match"]),
+        "scope": copy.deepcopy(rule["scope"]),
+        "fix": fix,
+        "rollback": rollback,
+        "verify": copy.deepcopy(rule["verify"]),
+    }
+    draft.update({
+        "draft": True,
+        "drafted_by": "ai",
+        "approved_by": "pending",
+        "approved_on": "",
+        "preview_required": True,
+    })
+
+    drafts_dir = DRAFTS_DIR.resolve()
+    path = (DRAFTS_DIR / f"{finding_id}.draft.yaml").resolve()
+    if path.parent != drafts_dir or RULES_DIR.resolve() in path.parents:
+        raise HTTPException(status_code=500, detail="Refusing to write a draft outside remediations/drafts/")
+    if path.exists() and not path.is_file():
+        raise HTTPException(status_code=500, detail=f"{path.name} exists and is not a regular file")
+    text = yaml.safe_dump(draft, sort_keys=False, allow_unicode=True, default_flow_style=False)
+    try:
+        drafts_dir.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not write draft: {exc}") from None
+
+    return {
+        "ok": True,
+        "finding_id": finding_id,
+        "path": f"remediations/drafts/{path.name}",
+        "content": text,
+        "draft": draft,
+        "applied": False,
+    }
 
 
 def main():

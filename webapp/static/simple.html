@@ -276,6 +276,9 @@
   var LOAD_FAILED = "Could not load the latest results. Run a check first.";
   var PLAIN_MISSING = "Plain-language text is missing for this problem.";
   var MANUAL_APPROVAL = "Not applicable. Needs a rebuild or design change.";
+  var DRAFT_WRITTEN = "A draft fix was written. Nothing has changed yet. Check the preview before you approve it.";
+  // The dry-run route only takes a rule id, so it cannot preview a draft file yet.
+  var DRAFT_PREVIEW_MISSING = "Preview for drafts is not available yet";
   var FEED_PAGE = 25;
   var AUTO_MS = 30000;
 
@@ -284,6 +287,8 @@
   var busy = false;
   var panels = {};      // rule id -> { title, lines, raw, final, finalKind, confirm, dom }
   var expanded = {};    // rule id -> true when "Show more" is open
+  var drafts = {};      // rule id -> { working, error, fixText, rollbackText, path }
+  var drafting = false; // true while an AI draft request is in flight; every button is disabled
   var feedFilter = "all";
   var feedShowAll = false;
   var autoTimer = null;
@@ -675,6 +680,11 @@
       wrap.appendChild(p ? problemCard(id, finding, st, p) : missingCard(id, finding, st));
     });
     $("no-match").hidden = shown !== 0;
+    if (drafting) lockAllButtons();
+  }
+
+  function lockAllButtons() {
+    document.querySelectorAll("button").forEach(function (b) { b.disabled = true; });
   }
 
   function field(label, text) {
@@ -752,10 +762,18 @@
         undo.addEventListener("click", function () { askUndo(id); });
         actions.appendChild(undo);
       }
+      // A draft is offered only where no approved rule is in force yet.
+      if (!approved || !state.rules[id]) {
+        var draftBtn = el("button", "act", "Draft a fix with AI");
+        draftBtn.type = "button";
+        draftBtn.addEventListener("click", function () { runDraft(id); });
+        actions.appendChild(draftBtn);
+      }
       card.appendChild(actions);
       if (!approved) card.appendChild(el("p", "note", "Waiting for approval"));
     }
 
+    if (drafts[id]) card.appendChild(renderDraft(id));
     if (panels[id]) card.appendChild(renderPanel(id));
 
     showMoreToggle(card, id, finding, st);
@@ -863,6 +881,37 @@
       var close = el("button", "link", "Close this panel");
       close.type = "button";
       close.addEventListener("click", function () { delete panels[id]; renderProblems(); });
+      box.appendChild(close);
+    }
+    return box;
+  }
+
+  // The AI draft result for a card. It never offers Fix it or Undo: a draft is
+  // approved only by a person editing its file.
+  function renderDraft(id) {
+    var d = drafts[id];
+    var box = el("div", "panel");
+    box.setAttribute("aria-live", "polite");
+    box.appendChild(el("h4", "", "AI draft"));
+    if (d.working) {
+      box.appendChild(el("p", "final", "Drafting a fix..."));
+      return box;
+    }
+    if (d.error) {
+      box.appendChild(el("p", "final bad", d.error));
+    } else {
+      box.appendChild(el("p", "final good", DRAFT_WRITTEN));
+      box.appendChild(el("h4", "", "Draft wording"));
+      box.appendChild(field("What the fix would do", d.fixText || "(none)"));
+      box.appendChild(field("What undoing it would do", d.rollbackText || "(none)"));
+      if (d.path) box.appendChild(field("Saved in", d.path));
+      box.appendChild(el("p", "note", DRAFT_PREVIEW_MISSING));
+      box.appendChild(el("p", "muted", "To approve this draft, a person must edit its file."));
+    }
+    if (!busy) {
+      var close = el("button", "link", "Close this panel");
+      close.type = "button";
+      close.addEventListener("click", function () { delete drafts[id]; renderProblems(); });
       box.appendChild(close);
     }
     return box;
@@ -1009,6 +1058,49 @@
     statusEl.textContent = msg;
     setBusy(false);
     await loadData();
+  }
+
+  function draftErrorText(status, detail) {
+    if (status === 504) return "The model took too long to answer. Try again in a few minutes.";
+    if (detail) return "The draft could not be written: " + detail;
+    return "The draft could not be written. The server did not say why.";
+  }
+
+  // Ask the server for an AI draft. The server only writes a file under
+  // remediations/drafts/; nothing in the lab is changed.
+  async function runDraft(id) {
+    if (busy) return;
+    drafts[id] = { working: true };
+    drafting = true;
+    setBusy(true);
+    statusEl.textContent = "Drafting a fix for " + titleOf(id).toLowerCase() + "...";
+    var resp, body;
+    try {
+      resp = await fetch("/api/drafts/" + id, { method: "POST", cache: "no-store" });
+      body = await resp.json().catch(function () { return {}; });
+    } catch (e) {
+      resp = null;
+    }
+    var d;
+    if (!resp) {
+      d = { error: "The connection to the dashboard was lost." };
+    } else if (!resp.ok) {
+      d = { error: draftErrorText(resp.status, body && typeof body.detail === "string" ? body.detail : "") };
+    } else {
+      var draft = body && body.draft && typeof body.draft === "object" ? body.draft : {};
+      var fixSec = draft.fix && typeof draft.fix === "object" ? draft.fix : {};
+      var rbSec = draft.rollback && typeof draft.rollback === "object" ? draft.rollback : {};
+      d = {
+        fixText: typeof fixSec.description === "string" ? fixSec.description : "",
+        rollbackText: typeof rbSec.description === "string" ? rbSec.description : "",
+        path: typeof body.path === "string" ? body.path : "remediations/drafts/" + id + ".draft.yaml"
+      };
+    }
+    drafts[id] = d;
+    statusEl.textContent = d.error ? d.error : DRAFT_WRITTEN;
+    drafting = false;
+    document.querySelectorAll("button").forEach(function (b) { b.disabled = false; });
+    setBusy(false);
   }
 
   async function runScan() {

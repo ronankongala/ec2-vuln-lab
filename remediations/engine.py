@@ -10,6 +10,11 @@ against the sandbox account. Safety gates, all fail-closed:
   * every target must be owned by account 145443243505 and carry the tag
     Project=ec2-vuln-lab (plus any extra tags in scope.tags)
   * all gates are checked for every step before the first change is made
+  * some actions are always refused (FORBIDDEN_ACTIONS), even if a rule
+    lists them in scope.allowed_actions
+  * IAM changes are limited to inline policies on LAB_ROLE_NAME, flow logs
+    to the VPC tagged Name=LAB_VPC_NAME, and ssm:SendCommand to the named
+    commands in SSM_COMMANDS
   * fix.type "manual" rules only print their description
 
 Every action, refusal, and verify result is appended to
@@ -60,6 +65,41 @@ REQUIRED_KEYS = (
 )
 FIX_TYPES = ("automated", "manual")
 SENSITIVE_MARKERS = ("password", "secret", "credential", "privatekey", "accesskey", "sessiontoken")
+
+LAB_ROLE_NAME = "vuln-lab-target-role"
+LAB_VPC_NAME = "vuln-lab-vpc"
+
+# Actions the engine will never run, with the reason printed on refusal.
+# Checked before anything else, including scope.allowed_actions.
+FORBIDDEN_ACTIONS = {
+    "ec2:TerminateInstances": "terminating instances is never automated",
+    "ec2:DeleteVpc": "deleting the VPC is never automated",
+}
+FORBIDDEN_PREFIXES = {
+    "organizations:": "the management account and the SCP are out of scope",
+    "account:": "account settings are out of scope",
+    "aws-portal:": "billing is out of scope",
+    "billing:": "billing is out of scope",
+    "budgets:": "billing is out of scope",
+    "ce:": "billing is out of scope",
+    "cur:": "billing is out of scope",
+    "payments:": "billing is out of scope",
+    "tax:": "billing is out of scope",
+    "invoicing:": "billing is out of scope",
+    "purchase-orders:": "billing is out of scope",
+    "freetier:": "billing is out of scope",
+}
+IAM_ALLOWED_ACTIONS = ("iam:PutRolePolicy", "iam:DeleteRolePolicy")
+
+# The only commands ssm:SendCommand may run, by name. Rules pick one with
+# params.Command; any other params, or any name not listed here, is refused.
+SSM_COMMANDS = {
+    "show-os-release": ["cat /etc/os-release"],
+    "show-listening-ports": ["ss -tlnp"],
+    "show-sshd-config": ["sshd -T"],
+    "restart-sshd": ["systemctl restart sshd"],
+    "install-security-updates": ["dnf -y upgrade --security"],
+}
 
 VERIFY_ATTEMPTS = 3
 VERIFY_DELAY_S = 5
@@ -293,10 +333,39 @@ def resolve_iam_role(aws, name):
     return Target("iam_role", name, role["RoleId"], account, _tag_map(role.get("Tags")))
 
 
+def resolve_vpc(aws, name):
+    resp = aws.client("ec2").describe_vpcs(Filters=[{"Name": "tag:Name", "Values": [name]}])
+    vpcs = resp["Vpcs"]
+    if not vpcs:
+        raise Refused(f"No VPC named {name} found")
+    if len(vpcs) > 1:
+        ids = ", ".join(v["VpcId"] for v in vpcs)
+        raise Refused(f"Multiple VPCs named {name} ({ids}); refusing to guess")
+    vpc = vpcs[0]
+    return Target("vpc", name, vpc["VpcId"], vpc["OwnerId"], _tag_map(vpc.get("Tags")))
+
+
+def resolve_volume(aws, name):
+    resp = aws.client("ec2").describe_volumes(Filters=[{"Name": "tag:Name", "Values": [name]}])
+    volumes = resp["Volumes"]
+    if not volumes:
+        raise Refused(f"No volume named {name} found")
+    if len(volumes) > 1:
+        ids = ", ".join(v["VolumeId"] for v in volumes)
+        raise Refused(f"Multiple volumes named {name} ({ids}); refusing to guess")
+    vol = volumes[0]
+    # DescribeVolumes only returns volumes owned by the caller, so the owner
+    # is the caller's account.
+    account = aws.client("sts").get_caller_identity()["Account"]
+    return Target("volume", name, vol["VolumeId"], account, _tag_map(vol.get("Tags")))
+
+
 RESOLVERS = {
     "instance": resolve_instance,
     "security_group": resolve_security_group,
     "iam_role": resolve_iam_role,
+    "vpc": resolve_vpc,
+    "volume": resolve_volume,
 }
 
 
@@ -319,8 +388,9 @@ def check_target_scope(rule, target):
 # Action handlers
 #
 # Each handler declares the target type it accepts, how to build the API
-# call, how to read the relevant before/after state, and when the desired
-# state is already in place (so the step is a no-op).
+# call (from the target, params, and the state read just before the call),
+# how to read the relevant before/after state, and when the desired state is
+# already in place (so the step is a no-op).
 # ---------------------------------------------------------------------------
 
 Handler = namedtuple("Handler", "service method target_type build_call read is_done check_response")
@@ -337,7 +407,7 @@ def _no_response_check(resp):
 
 # Instance metadata options (CLD-01)
 
-def _metadata_call(target, params):
+def _metadata_call(target, params, state):
     return {"InstanceId": target.id, **params}
 
 
@@ -364,11 +434,11 @@ def _ip_permission(params, with_description):
     }
 
 
-def _revoke_call(target, params):
+def _revoke_call(target, params, state):
     return {"GroupId": target.id, "IpPermissions": [_ip_permission(params, False)]}
 
 
-def _authorize_call(target, params):
+def _authorize_call(target, params, state):
     call = {"GroupId": target.id, "IpPermissions": [_ip_permission(params, True)]}
     tags = params.get("Tags") or {}
     if tags:
@@ -426,11 +496,11 @@ def _role_policy_read(aws, target, params):
     return {"exists": True, "PolicyDocument": doc}
 
 
-def _delete_policy_call(target, params):
+def _delete_policy_call(target, params, state):
     return {"RoleName": target.name, "PolicyName": params["PolicyName"]}
 
 
-def _put_policy_call(target, params):
+def _put_policy_call(target, params, state):
     return {
         "RoleName": target.name,
         "PolicyName": params["PolicyName"],
@@ -440,12 +510,129 @@ def _put_policy_call(target, params):
 
 # Detailed monitoring (CLD-09)
 
-def _monitoring_call(target, params):
+def _monitoring_call(target, params, state):
     return {"InstanceIds": [target.id]}
 
 
 def _monitoring_read(aws, target, params):
     return {"MonitoringState": _describe_instance(aws, target).get("Monitoring", {}).get("State")}
+
+
+def _tag_specification(resource_type, rule_tags, extra=None):
+    tags = dict(REQUIRED_TAGS)
+    tags.update(rule_tags or {})
+    tags.update(extra or {})
+    return [{"ResourceType": resource_type,
+             "Tags": [{"Key": k, "Value": str(v)} for k, v in tags.items()]}]
+
+
+# VPC flow logs (lab VPC only)
+
+FLOW_LOG_PARAMS = (
+    "TrafficType", "LogDestinationType", "LogDestination", "LogGroupName",
+    "DeliverLogsPermissionArn", "LogFormat", "MaxAggregationInterval",
+)
+FLOW_LOG_MATCH_KEYS = ("TrafficType", "LogDestinationType", "LogDestination", "LogGroupName")
+
+
+def _flow_logs_read(aws, target, params):
+    resp = aws.client("ec2").describe_flow_logs(
+        Filters=[{"Name": "resource-id", "Values": [target.id]}]
+    )
+    matches = []
+    for fl in resp.get("FlowLogs", []):
+        if all(fl.get(k) == params[k] for k in FLOW_LOG_MATCH_KEYS if k in params):
+            matches.append({"FlowLogId": fl["FlowLogId"],
+                            **{k: fl.get(k) for k in FLOW_LOG_MATCH_KEYS}})
+    return {"matching_flow_logs": matches}
+
+
+def _create_flow_logs_call(target, params, state):
+    call = {"ResourceIds": [target.id], "ResourceType": "VPC"}
+    call.update({k: params[k] for k in FLOW_LOG_PARAMS if k in params})
+    call["TagSpecifications"] = _tag_specification("vpc-flow-log", params.get("Tags"))
+    return call
+
+
+def _delete_flow_logs_call(target, params, state):
+    # Only flow log IDs just read from this VPC are ever deleted.
+    return {"FlowLogIds": [fl["FlowLogId"] for fl in (state or {}).get("matching_flow_logs", [])]}
+
+
+def _flow_logs_response_check(resp):
+    if resp.get("Unsuccessful"):
+        return f"API reported unsuccessful items: {resp['Unsuccessful']}"
+    return None
+
+
+# EBS volumes. CreateVolume targets the lab instance: the new volume goes in
+# its Availability Zone and always carries the required tags. DeleteVolume
+# targets the volume itself and is refused while it is attached.
+
+CREATE_VOLUME_PARAMS = ("Size", "VolumeType", "Iops", "Throughput", "Encrypted", "KmsKeyId", "SnapshotId")
+
+
+def _create_volume_read(aws, target, params):
+    filters = [{"Name": "tag:Name", "Values": [params["VolumeName"]]}]
+    filters += [{"Name": f"tag:{k}", "Values": [v]} for k, v in REQUIRED_TAGS.items()]
+    vols = aws.client("ec2").describe_volumes(Filters=filters).get("Volumes", [])
+    zone = _describe_instance(aws, target).get("Placement", {}).get("AvailabilityZone")
+    return {
+        "AvailabilityZone": zone,
+        "volumes": [{"VolumeId": v["VolumeId"], "Size": v.get("Size"), "State": v.get("State")}
+                    for v in vols],
+    }
+
+
+def _create_volume_call(target, params, state):
+    call = {k: params[k] for k in CREATE_VOLUME_PARAMS if k in params}
+    call["AvailabilityZone"] = (state or {}).get("AvailabilityZone")
+    call["TagSpecifications"] = _tag_specification(
+        "volume", params.get("Tags"), {"Name": params["VolumeName"]}
+    )
+    return call
+
+
+def _volume_read(aws, target, params):
+    vols = aws.client("ec2").describe_volumes(VolumeIds=[target.id]).get("Volumes", [])
+    if not vols:
+        return {"exists": False, "attachments": []}
+    return {
+        "exists": True,
+        "State": vols[0].get("State"),
+        "attachments": [{"InstanceId": a.get("InstanceId"), "State": a.get("State")}
+                        for a in vols[0].get("Attachments", [])],
+    }
+
+
+def _delete_volume_call(target, params, state):
+    return {"VolumeId": target.id}
+
+
+# SSM Run Command, limited to SSM_COMMANDS
+
+def _ssm_read(aws, target, params):
+    info = aws.client("ssm").describe_instance_information(
+        Filters=[{"Key": "InstanceIds", "Values": [target.id]}]
+    ).get("InstanceInformationList", [])
+    return {"PingStatus": info[0].get("PingStatus") if info else "NotRegistered"}
+
+
+def _send_command_call(target, params, state):
+    name = params["Command"]
+    return {
+        "InstanceIds": [target.id],
+        "DocumentName": "AWS-RunShellScript",
+        "Parameters": {"commands": list(SSM_COMMANDS[name])},
+        "Comment": f"ec2-vuln-lab engine: {name}",
+    }
+
+
+def _send_command_response_check(resp):
+    status = (resp.get("Command") or {}).get("Status")
+    if status in ("Failed", "Cancelled", "TimedOut"):
+        return f"command status {status}"
+    return None
 
 
 HANDLERS = {
@@ -489,6 +676,36 @@ HANDLERS = {
         lambda state, params: state["MonitoringState"] in ("disabled", "disabling"),
         _no_response_check,
     ),
+    "ec2:CreateFlowLogs": Handler(
+        "ec2", "create_flow_logs", "vpc",
+        _create_flow_logs_call, _flow_logs_read,
+        lambda state, params: bool(state["matching_flow_logs"]),
+        _flow_logs_response_check,
+    ),
+    "ec2:DeleteFlowLogs": Handler(
+        "ec2", "delete_flow_logs", "vpc",
+        _delete_flow_logs_call, _flow_logs_read,
+        lambda state, params: not state["matching_flow_logs"],
+        _flow_logs_response_check,
+    ),
+    "ec2:CreateVolume": Handler(
+        "ec2", "create_volume", "instance",
+        _create_volume_call, _create_volume_read,
+        lambda state, params: bool(state["volumes"]),
+        _no_response_check,
+    ),
+    "ec2:DeleteVolume": Handler(
+        "ec2", "delete_volume", "volume",
+        _delete_volume_call, _volume_read,
+        lambda state, params: not state["exists"],
+        _no_response_check,
+    ),
+    "ssm:SendCommand": Handler(
+        "ssm", "send_command", "instance",
+        _send_command_call, _ssm_read,
+        lambda state, params: False,  # a command has no lasting state to compare; always runs
+        _send_command_response_check,
+    ),
 }
 
 
@@ -513,7 +730,105 @@ DESIRED_STATE = {
     "iam:PutRolePolicy": lambda params: {"exists": True, "PolicyDocument": params["PolicyDocument"]},
     "ec2:MonitorInstances": lambda params: {"MonitoringState": "enabled"},
     "ec2:UnmonitorInstances": lambda params: {"MonitoringState": "disabled"},
+    "ec2:CreateFlowLogs": lambda params: {"matching_flow_logs": [
+        {"FlowLogId": "(new)", **{k: params.get(k) for k in FLOW_LOG_MATCH_KEYS}}
+    ]},
+    "ec2:DeleteFlowLogs": lambda params: {"matching_flow_logs": []},
+    "ec2:CreateVolume": lambda params: {"volumes": [
+        {"VolumeId": "(new)", "Size": params.get("Size"), "State": "available"}
+    ]},
+    "ec2:DeleteVolume": lambda params: {"exists": False, "attachments": []},
+    "ssm:SendCommand": lambda params: {
+        "PingStatus": "Online",
+        "Command": params.get("Command"),
+        "Commands": list(SSM_COMMANDS.get(params.get("Command"), [])),
+    },
 }
+
+
+# Static per-action checks on a step. No AWS access; each raises Refused.
+
+def _check_lab_role(step):
+    name = step["target"]["name"]
+    if name != LAB_ROLE_NAME:
+        raise Refused(f"IAM changes are limited to role {LAB_ROLE_NAME}, rule names {name}")
+
+
+def _check_lab_vpc(step):
+    name = step["target"]["name"]
+    if name != LAB_VPC_NAME:
+        raise Refused(f"flow log changes are limited to VPC {LAB_VPC_NAME}, rule names {name}")
+
+
+def _check_create_volume(step):
+    params = step.get("params") or {}
+    if not params.get("VolumeName"):
+        raise Refused("ec2:CreateVolume needs params.VolumeName")
+    if not params.get("Size") and not params.get("SnapshotId"):
+        raise Refused("ec2:CreateVolume needs params.Size or params.SnapshotId")
+
+
+def _check_send_command(step):
+    params = step.get("params") or {}
+    extra = sorted(set(params) - {"Command"})
+    if extra:
+        raise Refused(f"ssm:SendCommand only accepts params.Command, got {', '.join(extra)}")
+    name = params.get("Command")
+    if name not in SSM_COMMANDS:
+        raise Refused(
+            f"ssm:SendCommand command {name!r} is not on the allowlist ({', '.join(SSM_COMMANDS)})"
+        )
+
+
+STEP_CHECKS = {
+    "iam:PutRolePolicy": _check_lab_role,
+    "iam:DeleteRolePolicy": _check_lab_role,
+    "ec2:CreateFlowLogs": _check_lab_vpc,
+    "ec2:DeleteFlowLogs": _check_lab_vpc,
+    "ec2:CreateVolume": _check_create_volume,
+    "ssm:SendCommand": _check_send_command,
+}
+
+
+# Checks that need the resolved target and its current state (read with
+# describe/get calls). Run for every step before the first change is made.
+
+def _guard_lab_vpc(target, state):
+    if target.tags.get("Name") != LAB_VPC_NAME:
+        raise Refused(f"vpc {target.name} ({target.id}) lacks tag Name={LAB_VPC_NAME}")
+
+
+def _guard_lab_role(target, state):
+    if target.name != LAB_ROLE_NAME:
+        raise Refused(f"IAM changes are limited to role {LAB_ROLE_NAME}, target is {target.name}")
+
+
+def _guard_detached_volume(target, state):
+    if state["attachments"]:
+        ids = ", ".join(a["InstanceId"] or "?" for a in state["attachments"])
+        raise Refused(f"volume {target.name} ({target.id}) is attached to {ids}; refusing to delete")
+
+
+STATE_GUARDS = {
+    "iam:PutRolePolicy": _guard_lab_role,
+    "iam:DeleteRolePolicy": _guard_lab_role,
+    "ec2:CreateFlowLogs": _guard_lab_vpc,
+    "ec2:DeleteFlowLogs": _guard_lab_vpc,
+    "ec2:DeleteVolume": _guard_detached_volume,
+}
+
+
+def forbidden_reason(action):
+    """Return why an action is always refused, or None if it is not forbidden."""
+    action = str(action or "")
+    if action in FORBIDDEN_ACTIONS:
+        return FORBIDDEN_ACTIONS[action]
+    for prefix, reason in FORBIDDEN_PREFIXES.items():
+        if action.startswith(prefix):
+            return reason
+    if action.startswith("iam:") and action not in IAM_ALLOWED_ACTIONS:
+        return f"IAM changes are limited to inline policies on role {LAB_ROLE_NAME}"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -526,8 +841,15 @@ def validate_steps(rule, steps):
     if scope_account != ALLOWED_ACCOUNT:
         raise Refused(f"scope.account is {scope_account or '<empty>'}, engine only allows {ALLOWED_ACCOUNT}")
     allowed = set(rule["scope"].get("allowed_actions") or [])
+    for action in sorted(allowed):
+        reason = forbidden_reason(action)
+        if reason:
+            raise Refused(f"scope.allowed_actions lists {action}, which is always refused: {reason}")
     for idx, step in enumerate(steps):
         action = step.get("action")
+        reason = forbidden_reason(action)
+        if reason:
+            raise Refused(f"step {idx + 1}: action {action} is always refused: {reason}")
         if action not in allowed:
             raise Refused(f"step {idx + 1}: action {action} is not in scope.allowed_actions")
         handler = HANDLERS.get(action)
@@ -541,6 +863,12 @@ def validate_steps(rule, steps):
             )
         if not (step.get("target") or {}).get("name"):
             raise Refused(f"step {idx + 1}: target.name is missing")
+        check = STEP_CHECKS.get(action)
+        if check:
+            try:
+                check(step)
+            except Refused as exc:
+                raise Refused(f"step {idx + 1}: {exc}") from None
 
 
 def check_caller_account(aws):
@@ -554,8 +882,11 @@ def check_caller_account(aws):
 # Execution
 # ---------------------------------------------------------------------------
 
-def run_steps(aws, rule, mode, steps):
-    """Resolve and gate every target first, then execute steps in order."""
+def resolve_targets(aws, rule, steps):
+    """Resolve and gate every target, then run each step's state guard.
+
+    Makes describe/get calls only. Raises Refused on the first problem.
+    """
     resolved = []
     cache = {}
     for step in steps:
@@ -566,15 +897,30 @@ def run_steps(aws, rule, mode, steps):
             check_target_scope(rule, target)
             cache[key] = target
         resolved.append((step, cache[key]))
+    for step, target in resolved:
+        guard = STATE_GUARDS.get(step["action"])
+        if guard:
+            params = step.get("params") or {}
+            guard(target, HANDLERS[step["action"]].read(aws, target, params))
+    return resolved
+
+
+def run_steps(aws, rule, mode, steps):
+    """Resolve and gate every target first, then execute steps in order."""
+    resolved = resolve_targets(aws, rule, steps)
 
     for idx, (step, target) in enumerate(resolved, start=1):
         action = step["action"]
         handler = HANDLERS[action]
         params = step.get("params") or {}
-        call = handler.build_call(target, params)
         label = f"[{idx}/{len(resolved)}] {action} on {target.type} {target.name} ({target.id})"
 
         before = handler.read(aws, target, params)
+        call = handler.build_call(target, params, before)
+        guard = STATE_GUARDS.get(action)
+        if guard:
+            # Re-check against the state read just before this call.
+            guard(target, before)
         if handler.is_done(before, params):
             print(f"{label}: already in desired state, no change")
             audit(rule, mode, action, "noop", call, target, before, before)
@@ -722,16 +1068,7 @@ def plan_steps(aws, rule, steps):
 
     Makes describe/get calls only. Returns one plan entry per step.
     """
-    resolved = []
-    cache = {}
-    for step in steps:
-        tgt = step["target"]
-        key = (tgt["type"], tgt["name"])
-        if key not in cache:
-            target = RESOLVERS[tgt["type"]](aws, tgt["name"])
-            check_target_scope(rule, target)
-            cache[key] = target
-        resolved.append((step, cache[key]))
+    resolved = resolve_targets(aws, rule, steps)
 
     plan = []
     for idx, (step, target) in enumerate(resolved, start=1):
@@ -753,7 +1090,7 @@ def plan_steps(aws, rule, steps):
             "current": current,
             "would_set": would_set,
             "status": status,
-            "call": handler.build_call(target, params),
+            "call": handler.build_call(target, params, current),
         })
     return plan
 

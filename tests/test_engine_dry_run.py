@@ -195,8 +195,8 @@ class DryRunTests(unittest.TestCase):
 
     def test_unsupported_action_refused_before_aws(self):
         rule = copy.deepcopy(self.rules["CLD-01"])
-        rule["fix"]["steps"][0]["action"] = "ec2:TerminateInstances"
-        rule["scope"]["allowed_actions"] = ["ec2:TerminateInstances"]
+        rule["fix"]["steps"][0]["action"] = "ec2:StopInstances"
+        rule["scope"]["allowed_actions"] = ["ec2:StopInstances"]
         code, out = self._run(rule, responses())
         self.assertEqual(code, engine.EXIT_REFUSED)
         self.assertIn("not supported", out)
@@ -219,7 +219,14 @@ class DryRunTests(unittest.TestCase):
                                 ("iam", "put_role_policy"),
                                 ("iam", "delete_role_policy"),
                                 ("iam", "attach_role_policy"),
-                                ("ec2", "create_tags")]:
+                                ("ec2", "create_tags"),
+                                ("ec2", "monitor_instances"),
+                                ("ec2", "unmonitor_instances"),
+                                ("ec2", "create_flow_logs"),
+                                ("ec2", "delete_flow_logs"),
+                                ("ec2", "create_volume"),
+                                ("ec2", "delete_volume"),
+                                ("ssm", "send_command")]:
             with self.assertRaises(engine.Refused):
                 getattr(aws.client(service), method)
         self.assertEqual(self.calls, [])
@@ -325,6 +332,228 @@ class DraftTests(unittest.TestCase):
         self.assertIn("drafts are only read from", str(ctx.exception.code))
         self.assertFalse(self.factory_used)
         self.assertFalse(self.audit_log.exists())
+
+
+def make_rule(action, target_type, name, params=None):
+    step = {"action": action, "target": {"type": target_type, "name": name}, "params": params or {}}
+    return {
+        "id": "TST-01", "version": 1, "match": {},
+        "scope": {"account": ACCOUNT, "tags": {}, "allowed_actions": [action]},
+        "fix": {"type": "automated", "description": "test", "steps": [step]},
+        "rollback": {"description": "test", "steps": []},
+        "verify": {"check": "none", "expect": "closed"},
+        "approved_by": "pending", "approved_on": "",
+    }
+
+
+LAB_VPC = {"VpcId": "vpc-0123", "OwnerId": ACCOUNT,
+           "Tags": [{"Key": "Name", "Value": "vuln-lab-vpc"}] + GOOD_TAGS}
+FLOW_LOG_PARAMS = {"TrafficType": "ALL", "LogDestinationType": "s3",
+                   "LogDestination": "arn:aws:s3:::vuln-lab-flow-logs"}
+
+
+def volume(attached=False, tags=GOOD_TAGS):
+    vol = {"VolumeId": "vol-0123", "Size": 8, "State": "in-use" if attached else "available",
+           "Tags": [{"Key": "Name", "Value": "vuln-lab-scratch"}] + tags,
+           "Attachments": [{"InstanceId": "i-0123456789abcdef0", "State": "attached"}] if attached else []}
+    return {"Volumes": [vol]}
+
+
+class HandlerTests(unittest.TestCase):
+    """Dry-run and gate tests for each handler, using the fake AWS clients."""
+
+    tearDown = DryRunTests.tearDown
+    _hash_rules = staticmethod(DryRunTests._hash_rules)
+    _factory = DryRunTests._factory
+    _run = DryRunTests._run
+    _audit_entries = DryRunTests._audit_entries
+    _assert_read_only = DryRunTests._assert_read_only
+
+    def setUp(self):
+        DryRunTests.setUp(self)
+
+    def _planned(self):
+        entries = self._audit_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["result"], "planned")
+        return entries[0]["detail"]["planned_changes"][0]
+
+    def _assert_refused_before_aws(self, rule, text):
+        code, out = self._run(rule, responses())
+        self.assertEqual(code, engine.EXIT_REFUSED)
+        self.assertIn(text, out)
+        self.assertFalse(self.factory_used)
+        self.assertEqual(self.calls, [])
+
+    def test_monitor_instances_dry_run(self):
+        code, out = self._run(self.rules["CLD-09"], responses())
+        self.assertEqual(code, engine.EXIT_OK)
+        self.assertIn("would change", out)
+        self.assertEqual(self._planned()["current"], {"MonitoringState": "disabled"})
+        self._assert_read_only()
+
+    def test_unmonitor_instances_dry_run(self):
+        rule = make_rule("ec2:UnmonitorInstances", "instance", "vuln-lab-target")
+        code, out = self._run(rule, responses())
+        self.assertEqual(code, engine.EXIT_OK)
+        self.assertIn("already in desired state", out)
+        self._assert_read_only()
+
+    def test_create_flow_logs_dry_run(self):
+        rule = make_rule("ec2:CreateFlowLogs", "vpc", "vuln-lab-vpc", FLOW_LOG_PARAMS)
+        code, out = self._run(rule, responses(describe_vpcs={"Vpcs": [LAB_VPC]},
+                                              describe_flow_logs={"FlowLogs": []}))
+        self.assertEqual(code, engine.EXIT_OK)
+        self.assertIn("would change", out)
+        call = self._planned()["call"]
+        self.assertEqual(call["ResourceIds"], ["vpc-0123"])
+        self.assertIn({"Key": "Project", "Value": "ec2-vuln-lab"}, call["TagSpecifications"][0]["Tags"])
+        self.assertIn("ec2.describe_flow_logs", self.calls)
+        self._assert_read_only()
+
+    def test_delete_flow_logs_dry_run(self):
+        rule = make_rule("ec2:DeleteFlowLogs", "vpc", "vuln-lab-vpc", FLOW_LOG_PARAMS)
+        existing = {"FlowLogId": "fl-0123", **FLOW_LOG_PARAMS}
+        code, out = self._run(rule, responses(describe_vpcs={"Vpcs": [LAB_VPC]},
+                                              describe_flow_logs={"FlowLogs": [existing]}))
+        self.assertEqual(code, engine.EXIT_OK)
+        self.assertIn("would change", out)
+        self.assertEqual(self._planned()["call"], {"FlowLogIds": ["fl-0123"]})
+        self._assert_read_only()
+
+    def test_flow_logs_refused_for_other_vpc(self):
+        rule = make_rule("ec2:CreateFlowLogs", "vpc", "default-vpc", FLOW_LOG_PARAMS)
+        self._assert_refused_before_aws(rule, "limited to VPC vuln-lab-vpc")
+
+    def test_flow_logs_refused_for_untagged_vpc(self):
+        vpc = dict(LAB_VPC, Tags=[{"Key": "Name", "Value": "vuln-lab-vpc"}])
+        rule = make_rule("ec2:CreateFlowLogs", "vpc", "vuln-lab-vpc", FLOW_LOG_PARAMS)
+        code, out = self._run(rule, responses(describe_vpcs={"Vpcs": [vpc]}))
+        self.assertEqual(code, engine.EXIT_REFUSED)
+        self.assertIn("lacks tag Project=ec2-vuln-lab", out)
+
+    def test_create_volume_dry_run(self):
+        resp = responses(describe_volumes={"Volumes": []})
+        resp["ec2"]["describe_instances"]["Reservations"][0]["Instances"][0]["Placement"] = {
+            "AvailabilityZone": "us-east-1a"}
+        rule = make_rule("ec2:CreateVolume", "instance", "vuln-lab-target",
+                         {"VolumeName": "vuln-lab-scratch", "Size": 8, "Encrypted": True})
+        code, out = self._run(rule, resp)
+        self.assertEqual(code, engine.EXIT_OK)
+        self.assertIn("would change", out)
+        call = self._planned()["call"]
+        self.assertEqual(call["AvailabilityZone"], "us-east-1a")
+        tags = call["TagSpecifications"][0]["Tags"]
+        self.assertIn({"Key": "Project", "Value": "ec2-vuln-lab"}, tags)
+        self.assertIn({"Key": "Name", "Value": "vuln-lab-scratch"}, tags)
+        self._assert_read_only()
+
+    def test_create_volume_needs_name(self):
+        rule = make_rule("ec2:CreateVolume", "instance", "vuln-lab-target", {"Size": 8})
+        self._assert_refused_before_aws(rule, "needs params.VolumeName")
+
+    def test_delete_volume_dry_run(self):
+        rule = make_rule("ec2:DeleteVolume", "volume", "vuln-lab-scratch")
+        code, out = self._run(rule, responses(describe_volumes=volume()))
+        self.assertEqual(code, engine.EXIT_OK)
+        self.assertIn("would change", out)
+        self.assertEqual(self._planned()["call"], {"VolumeId": "vol-0123"})
+        self._assert_read_only()
+
+    def test_delete_volume_refused_when_attached(self):
+        rule = make_rule("ec2:DeleteVolume", "volume", "vuln-lab-scratch")
+        code, out = self._run(rule, responses(describe_volumes=volume(attached=True)))
+        self.assertEqual(code, engine.EXIT_REFUSED)
+        self.assertIn("is attached to i-0123456789abcdef0", out)
+        self._assert_read_only()
+
+    def test_delete_volume_refused_when_untagged(self):
+        rule = make_rule("ec2:DeleteVolume", "volume", "vuln-lab-scratch")
+        code, out = self._run(rule, responses(describe_volumes=volume(tags=[])))
+        self.assertEqual(code, engine.EXIT_REFUSED)
+        self.assertIn("lacks tag Project=ec2-vuln-lab", out)
+
+    def test_apply_never_deletes_attached_volume(self):
+        aws = engine.Aws.__new__(engine.Aws)
+        aws.session = FakeSession(self.calls, responses(describe_volumes=volume(attached=True)))
+        aws.region = "us-east-1"
+        aws._clients = {}
+        rule = make_rule("ec2:DeleteVolume", "volume", "vuln-lab-scratch")
+        with self.assertRaises(engine.Refused):
+            engine.run_steps(aws, rule, "apply", rule["fix"]["steps"])
+        self.assertNotIn("ec2.delete_volume", self.calls)
+
+    def test_role_policy_refused_for_other_role(self):
+        for action in ("iam:PutRolePolicy", "iam:DeleteRolePolicy"):
+            with self.subTest(action=action):
+                self.calls.clear()
+                self.factory_used = False
+                rule = make_rule(action, "iam_role", "admin-role",
+                                 {"PolicyName": "p", "PolicyDocument": {}})
+                self._assert_refused_before_aws(rule, "limited to role vuln-lab-target-role")
+
+    def test_put_role_policy_dry_run(self):
+        resp = responses()
+        resp["iam"] = {
+            "get_role": {"Role": {"Arn": f"arn:aws:iam::{ACCOUNT}:role/vuln-lab-target-role",
+                                  "RoleId": "AROA123", "Tags": GOOD_TAGS}},
+            "get_role_policy": NoSuchEntityException(),
+        }
+        rule = make_rule("iam:PutRolePolicy", "iam_role", "vuln-lab-target-role",
+                         {"PolicyName": "p", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}})
+        code, out = self._run(rule, resp)
+        self.assertEqual(code, engine.EXIT_OK)
+        self.assertIn("would change", out)
+        self._assert_read_only()
+
+    def test_send_command_dry_run(self):
+        resp = responses()
+        resp["ssm"] = {"describe_instance_information": {
+            "InstanceInformationList": [{"InstanceId": "i-0123456789abcdef0", "PingStatus": "Online"}]}}
+        rule = make_rule("ssm:SendCommand", "instance", "vuln-lab-target", {"Command": "show-os-release"})
+        code, out = self._run(rule, resp)
+        self.assertEqual(code, engine.EXIT_OK)
+        self.assertIn("would change", out)
+        call = self._planned()["call"]
+        self.assertEqual(call["DocumentName"], "AWS-RunShellScript")
+        self.assertEqual(call["Parameters"], {"commands": engine.SSM_COMMANDS["show-os-release"]})
+        self.assertIn("ssm.describe_instance_information", self.calls)
+        self._assert_read_only()
+
+    def test_send_command_rejects_unlisted_command(self):
+        rule = make_rule("ssm:SendCommand", "instance", "vuln-lab-target", {"Command": "rm -rf /"})
+        self._assert_refused_before_aws(rule, "is not on the allowlist")
+
+    def test_send_command_rejects_extra_params(self):
+        rule = make_rule("ssm:SendCommand", "instance", "vuln-lab-target",
+                         {"Command": "show-os-release", "DocumentName": "AWS-RunPowerShellScript"})
+        self._assert_refused_before_aws(rule, "only accepts params.Command")
+
+    def test_send_command_refused_for_untagged_instance(self):
+        rule = make_rule("ssm:SendCommand", "instance", "vuln-lab-target", {"Command": "show-os-release"})
+        code, out = self._run(rule, responses(describe_instances=instance(tags=[])))
+        self.assertEqual(code, engine.EXIT_REFUSED)
+        self.assertIn("lacks tag Project=ec2-vuln-lab", out)
+
+    def test_forbidden_actions_refused(self):
+        for action, target_type in [("ec2:TerminateInstances", "instance"),
+                                    ("ec2:DeleteVpc", "vpc"),
+                                    ("iam:CreateUser", "iam_role"),
+                                    ("iam:AttachUserPolicy", "iam_role"),
+                                    ("iam:DeleteRole", "iam_role"),
+                                    ("organizations:DetachPolicy", "instance"),
+                                    ("aws-portal:ModifyBilling", "instance"),
+                                    ("billing:UpdateBillingPreferences", "instance")]:
+            with self.subTest(action=action):
+                self.calls.clear()
+                self.factory_used = False
+                rule = make_rule(action, target_type, "vuln-lab-target")
+                self._assert_refused_before_aws(rule, "always refused")
+
+    def test_forbidden_action_in_allowed_list_refuses_rule(self):
+        rule = copy.deepcopy(self.rules["CLD-01"])
+        rule["scope"]["allowed_actions"].append("ec2:TerminateInstances")
+        self._assert_refused_before_aws(rule, "scope.allowed_actions lists ec2:TerminateInstances")
 
 
 if __name__ == "__main__":
