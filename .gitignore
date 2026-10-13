@@ -30,3 +30,4 @@ __pycache__/
 # Local environment and scratch files
 .env
 diff.txt
+remediations/drafts/*.draft.yaml
