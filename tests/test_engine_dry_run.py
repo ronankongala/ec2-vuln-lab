@@ -689,6 +689,117 @@ class ServerFullDraftTests(unittest.TestCase):
         self._assert_rejected(full_draft_reply(step),
                               "target security_group prod-db-sg is not a lab resource tagged Project=ec2-vuln-lab")
 
+    def test_rejects_fix_that_adds_access(self):
+        step = full_draft_step("ec2:AuthorizeSecurityGroupIngress", "security_group", "vuln-lab-target-sg")
+        step["params"] = SG_PARAMS
+        self._assert_rejected(full_draft_reply(step), "AI drafts may only remove access")
+
+    def test_accepts_fix_that_only_revokes(self):
+        step = full_draft_step("ec2:RevokeSecurityGroupIngress", "security_group", "vuln-lab-target-sg")
+        step["params"] = SG_PARAMS
+        resp = self._post(full_draft_reply(step))
+        self.assertEqual(resp.status_code, 200, resp.text)
+        saved = engine.yaml.safe_load((self.drafts_dir / f"{SCRATCH_ID}.draft.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(saved["fix"]["steps"][0]["action"], "ec2:RevokeSecurityGroupIngress")
+
+    def test_accepts_rollback_that_re_adds_rule(self):
+        step = full_draft_step("ec2:RevokeSecurityGroupIngress", "security_group", "vuln-lab-target-sg")
+        step["params"] = SG_PARAMS
+        undo = full_draft_step("ec2:AuthorizeSecurityGroupIngress", "security_group", "vuln-lab-target-sg")
+        undo["params"] = SG_PARAMS
+        reply = engine.yaml.safe_load(full_draft_reply(
+            step, allowed=["ec2:RevokeSecurityGroupIngress", "ec2:AuthorizeSecurityGroupIngress"]))
+        reply["fix"]["description"] = "Revoke the open SSH rule."
+        reply["rollback"] = {"description": "Authorize the SSH rule again.", "steps": [undo]}
+        resp = self._post(engine.yaml.safe_dump(reply, sort_keys=False))
+        self.assertEqual(resp.status_code, 200, resp.text)
+        saved = engine.yaml.safe_load((self.drafts_dir / f"{SCRATCH_ID}.draft.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(saved["rollback"]["steps"][0]["action"], "ec2:AuthorizeSecurityGroupIngress")
+
+
+def rule_draft_reply(fix_extra=None):
+    """A stubbed model reply for a finding with an approved rule: wording, plus optional extra steps."""
+    reply = {
+        "fix": {"description": "Enable detailed monitoring on the lab instance."},
+        "rollback": {"description": "Return the lab instance to basic monitoring."},
+    }
+    if fix_extra is not None:
+        reply["fix"]["extra_steps"] = fix_extra
+    return engine.yaml.safe_dump(reply, sort_keys=False)
+
+
+class ServerRuleDraftTests(unittest.TestCase):
+    """POST /api/drafts for a finding that has an approved rule. The model reply is stubbed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.rule_hashes = DryRunTests._hash_rules()
+        tmp = Path(self.tmp.name)
+        rules_dir = tmp / "rules"
+        rules_dir.mkdir()
+        for path in engine.RULES_DIR.glob("*.yaml"):
+            shutil.copy(path, rules_dir / path.name)
+        self.rule = engine.yaml.safe_load((rules_dir / f"{SCRATCH_ID}.yaml").read_text(encoding="utf-8"))
+        self.drafts_dir = tmp / "drafts"
+        self.request_draft = mock.Mock()
+        settings = {"DRAFT_API_BASE": "https://model.invalid/v1", "DRAFT_API_KEY": "k", "DRAFT_MODEL": "m"}
+        for target, value in [(server, {"RULES_DIR": rules_dir}),
+                              (server, {"DRAFTS_DIR": self.drafts_dir}),
+                              (server, {"load_draft_settings": mock.Mock(return_value=settings)}),
+                              (server, {"request_draft": self.request_draft}),
+                              (server, {"draft_from_scratch": mock.Mock(side_effect=AssertionError("scratch path"))}),
+                              (server.urllib.request, {"urlopen": mock.Mock(side_effect=AssertionError("real model call"))})]:
+            patcher = mock.patch.multiple(target, **value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.client = TestClient(server.app)
+
+    def tearDown(self):
+        self.assertEqual(self.rule_hashes, DryRunTests._hash_rules(), "a rule file was modified")
+
+    def _post(self, reply):
+        self.request_draft.return_value = reply
+        resp = self.client.post(f"/api/drafts/{SCRATCH_ID}")
+        self.request_draft.assert_called_once()
+        self.assertEqual(resp.status_code, 200, resp.text)
+        saved = engine.yaml.safe_load((self.drafts_dir / f"{SCRATCH_ID}.draft.yaml").read_text(encoding="utf-8"))
+        return resp.json(), saved
+
+    def test_extra_step_ignored_and_reported(self):
+        body, saved = self._post(rule_draft_reply([full_draft_step("ec2:MonitorInstances")]))
+        self.assertEqual(body["ignored_extra_steps"], ["ec2:MonitorInstances"])
+        self.assertNotIn("ignored_extra_steps", saved)
+        self.assertEqual(saved, body["draft"])
+        self.assertEqual(saved["fix"]["steps"], self.rule["fix"]["steps"])
+        self.assertEqual(saved["rollback"]["steps"], self.rule["rollback"]["steps"])
+        self.assertNotIn("extra_steps", saved["fix"])
+        self.assertNotIn("extra_steps", saved["rollback"])
+
+    def test_steps_and_structure_copied_exactly_from_rule(self):
+        body, saved = self._post(rule_draft_reply())
+        self.assertEqual(body["ignored_extra_steps"], [])
+        self.assertEqual(saved["fix"]["steps"], self.rule["fix"]["steps"])
+        self.assertEqual(saved["rollback"]["steps"], self.rule["rollback"]["steps"])
+        for key in ("match", "scope", "verify"):
+            self.assertEqual(saved[key], self.rule[key], key)
+        self.assertEqual(saved["fix"]["description"], "Enable detailed monitoring on the lab instance.")
+        self.assertIs(saved["draft"], True)
+        self.assertEqual(saved["drafted_by"], "ai")
+        self.assertEqual(saved["approved_by"], "pending")
+        self.assertEqual(saved["approved_on"], "")
+        self.assertIs(saved["preview_required"], True)
+        self.assertIs(body["applied"], False)
+
+    def test_prompt_lists_rule_steps_and_limits_wording(self):
+        self._post(rule_draft_reply())
+        _, user = self.request_draft.call_args.args[1:]
+        self.assertIn("ec2:MonitorInstances on instance vuln-lab-target", user)
+        self.assertIn("ec2:UnmonitorInstances on instance vuln-lab-target", user)
+        self.assertIn("You only write the description wording", user)
+        self.assertIn("must not name any action, target, or IP address that is not listed above", user)
+        self.assertNotIn("extra_steps: []", user)
+
 
 if __name__ == "__main__":
     unittest.main()

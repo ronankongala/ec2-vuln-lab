@@ -77,17 +77,16 @@ PROMPT_SCRUBBERS = (
 )
 
 # The only keys the drafting model may write. Every structural field of the
-# draft is copied from the approved rule by the server, not by the model.
+# draft, including every step, is copied from the approved rule by the server.
+# Any extra_steps in the reply are dropped and reported, never saved.
 DRAFT_REPLY_TEMPLATE = """\
 fix:
   description: >-
     <what the fix changes and what it does not affect>
-  extra_steps: []
 
 rollback:
   description: >-
     <how the rollback restores the original state>
-  extra_steps: []
 """
 DRAFT_STEP_KEYS = {"action", "target", "params"}
 
@@ -104,6 +103,15 @@ LAB_TARGET_NAMES = {
     "instance": "vuln-lab-target",
 }
 FULL_DRAFT_KEYS = ("match", "scope", "fix", "rollback", "verify")
+# A full draft's fix may only remove access. Any action whose name starts with
+# Authorize, and these named actions, add access and are rejected in fix steps.
+# Rollback steps may use them to re-add the access the fix removed.
+ACCESS_ADDING_ACTIONS = {
+    "ec2:AuthorizeSecurityGroupIngress",
+    "ec2:AuthorizeSecurityGroupEgress",
+    "iam:PutRolePolicy",
+    "iam:AttachRolePolicy",
+}
 FULL_DRAFT_REPLY_TEMPLATE = """\
 match:
   check: <scanner check name>
@@ -574,8 +582,6 @@ def describe_steps(steps):
 def build_draft_prompt(finding_id, finding, rule):
     title = scrub_prompt_text(finding.get("title", "")) or "(not available)"
     control = scrub_prompt_text(finding.get("cis_or_nist", "")) or "(not available)"
-    allowed_actions = rule["scope"]["allowed_actions"]
-    actions = "\n".join(f"- {a}" for a in allowed_actions) or "(none: leave both extra_steps lists empty)"
     targets = "\n".join(f"- {t} {n}" for t, n in rule_targets(rule)) or "(none)"
     system = (
         "You write the wording for remediation rules in a security lab. Reply with YAML only. "
@@ -586,12 +592,15 @@ def build_draft_prompt(finding_id, finding, rule):
         f"Finding title: {title}\n"
         f"Control: {control}\n"
         f"Fix type: {rule['fix']['type']}\n\n"
-        f"Fix steps (already fixed, do not repeat them):\n{describe_steps(rule['fix']['steps'])}\n\n"
-        f"Rollback steps (already fixed, do not repeat them):\n{describe_steps(rule['rollback']['steps'])}\n\n"
-        "Only add extra_steps if the steps above are not enough. Leave them as empty lists otherwise. "
-        "Each extra step needs action, target (type and name), and optional params.\n"
-        f"Extra steps may use only these actions:\n{actions}\n"
-        f"Extra steps may target only these resources (type name):\n{targets}\n\n"
+        "The steps below are copied exactly from the approved rule. They are final. "
+        "You only write the description wording for them. Do not add, remove, or change any step, "
+        "and do not reply with steps or extra_steps; any steps in your reply are ignored.\n\n"
+        f"Fix steps the fix description must describe (action on target type and name):\n"
+        f"{describe_steps(rule['fix']['steps'])}\n\n"
+        f"Rollback steps the rollback description must describe (action on target type and name):\n"
+        f"{describe_steps(rule['rollback']['steps'])}\n\n"
+        f"Resources these steps target (type name):\n{targets}\n\n"
+        "The descriptions must not name any action, target, or IP address that is not listed above.\n\n"
         "Use exactly this YAML shape and these keys, and no other keys. Replace each <placeholder>:\n\n"
         f"{DRAFT_REPLY_TEMPLATE}\n"
         "Output the YAML document only."
@@ -693,43 +702,19 @@ def reply_text(parsed, section):
     return text.strip()
 
 
-def reply_extra_steps(parsed, section, rule):
-    """Extra steps from the model, accepted only with an in-scope action and a target from the approved rule."""
+def ignored_extra_steps(parsed, section):
+    """Action names of any extra_steps the model returned. They are reported, never saved."""
     part = parsed.get(section)
     steps = part.get("extra_steps") if isinstance(part, dict) else None
     if steps is None:
         return []
     if not isinstance(steps, list):
-        raise HTTPException(status_code=422, detail=f"Model reply {section}.extra_steps is not a list")
-    allowed = set(rule["scope"]["allowed_actions"])
-    targets = rule_targets(rule)
-    accepted = []
-    for i, step in enumerate(steps):
-        where = f"{section}.extra_steps[{i}]"
-        if not isinstance(step, dict):
-            raise HTTPException(status_code=422, detail=f"Model reply {where} is not a mapping")
-        unknown = sorted(str(k) for k in step if k not in DRAFT_STEP_KEYS)
-        if unknown:
-            raise HTTPException(status_code=422, detail=f"Model reply {where} has unknown keys: {', '.join(unknown)}")
-        action = step.get("action")
-        if not isinstance(action, str) or action not in allowed:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Model reply {where} action {action!r} is not in scope.allowed_actions",
-            )
-        target = step.get("target")
-        pair = (target.get("type"), target.get("name")) if isinstance(target, dict) else None
-        if pair not in targets:
-            raise HTTPException(status_code=422, detail=f"Model reply {where} target is not a target in the approved rule")
-        params = step.get("params", {})
-        if not isinstance(params, dict):
-            raise HTTPException(status_code=422, detail=f"Model reply {where} params is not a mapping")
-        accepted.append({
-            "action": action,
-            "target": {"type": pair[0], "name": pair[1]},
-            "params": copy.deepcopy(params),
-        })
-    return accepted
+        return ["<extra_steps was not a list>"]
+    names = []
+    for step in steps:
+        action = step.get("action") if isinstance(step, dict) else None
+        names.append(action.strip() if isinstance(action, str) and action.strip() else "<no action>")
+    return names
 
 
 def parse_reply(reply):
@@ -743,7 +728,11 @@ def parse_reply(reply):
 
 
 def draft_from_rule(finding_id):
-    """Draft for a finding with an approved rule: structure from the rule, wording from the model."""
+    """Draft for a finding with an approved rule: structure from the rule, wording from the model.
+
+    Returns the draft and the action names of any extra_steps the model returned,
+    which are dropped.
+    """
     rule = load_rule(finding_id)
     check_approved_rule_shape(finding_id, rule)
     settings = load_draft_settings()
@@ -754,18 +743,17 @@ def draft_from_rule(finding_id):
     parsed = parse_reply(reply)
     fix_description = reply_text(parsed, "fix")
     rollback_description = reply_text(parsed, "rollback")
-    fix_extra = reply_extra_steps(parsed, "fix", rule)
-    rollback_extra = reply_extra_steps(parsed, "rollback", rule)
+    ignored = ignored_extra_steps(parsed, "fix") + ignored_extra_steps(parsed, "rollback")
 
-    # Every structural field comes from the approved rule. The model supplies
-    # only the two descriptions and any validated extra steps.
+    # Every structural field, including every step, comes from the approved
+    # rule. The model supplies only the two descriptions.
     fix = {k: copy.deepcopy(v) for k, v in rule["fix"].items() if k not in ("description", "steps")}
     fix["description"] = fix_description
-    fix["steps"] = copy.deepcopy(rule["fix"]["steps"]) + fix_extra
+    fix["steps"] = copy.deepcopy(rule["fix"]["steps"])
     rollback = {k: copy.deepcopy(v) for k, v in rule["rollback"].items() if k not in ("description", "steps")}
     rollback["description"] = rollback_description
-    rollback["steps"] = copy.deepcopy(rule["rollback"]["steps"]) + rollback_extra
-    return {
+    rollback["steps"] = copy.deepcopy(rule["rollback"]["steps"])
+    draft = {
         "id": rule["id"],
         "version": copy.deepcopy(rule["version"]),
         "match": copy.deepcopy(rule["match"]),
@@ -774,6 +762,7 @@ def draft_from_rule(finding_id):
         "rollback": rollback,
         "verify": copy.deepcopy(rule["verify"]),
     }
+    return draft, ignored
 
 
 def load_engine():
@@ -989,7 +978,11 @@ def build_full_draft_prompt(finding_id, finding, policy, check_names):
         "fix.type is automated or manual. A manual fix has empty fix.steps and rollback.steps and "
         "explains the work in the descriptions.\n"
         "Each step needs action, target (type and name), and params. Write params: {} when an action needs none.\n"
-        "rollback.steps must undo fix.steps.\n\n"
+        "rollback.steps must undo fix.steps.\n"
+        "For fix.steps, the fix must only remove access: revoke a security group rule or detach a policy, "
+        "and do not add any step that grants access or adds a rule. For rollback.steps, the rollback may "
+        "add back what fix.steps removed, because it undoes the fix. If removing access alone cannot fix "
+        "the finding, set fix.type to manual with empty fix.steps and rollback.steps.\n\n"
         "Use exactly this YAML shape with these top-level keys and no others: "
         f"{', '.join(FULL_DRAFT_KEYS)}. Replace each <placeholder>:\n\n"
         f"{FULL_DRAFT_REPLY_TEMPLATE}\n"
@@ -1052,6 +1045,9 @@ def full_reply_steps(part, section, policy, lab_names):
         reason = engine.forbidden_reason(action)
         if reason:
             reject(where, f"action {action} is forbidden by the engine: {reason}")
+        if section == "fix" and (action in ACCESS_ADDING_ACTIONS
+                                 or action.partition(":")[2].startswith("Authorize")):
+            reject(where, f"action {action} adds access; AI drafts may only remove access")
         spec = policy["actions"].get(action)
         if spec is None:
             reject(where, f"action {action!r} is not on the engine's allowed list")
@@ -1207,16 +1203,18 @@ def save_draft(finding_id, draft):
 def create_draft(finding_id: str):
     """Ask the configured model for a draft and save it to remediations/drafts/. Never applies it.
 
-    With an approved rule, the model writes only the wording. Without one, the
-    model writes the whole draft and the server validates it before saving.
+    With an approved rule, the model writes only the wording, and any extra
+    steps it returns are dropped and listed in ignored_extra_steps. Without one,
+    the model writes the whole draft and the server validates it before saving.
     """
     if not RULE_ID_RE.fullmatch(finding_id):
         raise HTTPException(status_code=400, detail="finding_id must match ^CLD-0[1-9]$")
     if (RULES_DIR / f"{finding_id}.yaml").is_file():
-        draft = draft_from_rule(finding_id)
-    else:
-        draft = draft_from_scratch(finding_id)
-    return save_draft(finding_id, draft)
+        draft, ignored = draft_from_rule(finding_id)
+        result = save_draft(finding_id, draft)
+        result["ignored_extra_steps"] = ignored
+        return result
+    return save_draft(finding_id, draft_from_scratch(finding_id))
 
 
 def main():
