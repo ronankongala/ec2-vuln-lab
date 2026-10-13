@@ -107,6 +107,8 @@ py -3.13 webapp\server.py
 
 Then open http://127.0.0.1:8000/. The server listens on 127.0.0.1 only, so it is not reachable from other machines. It has no login, so do not expose it to a network.
 
+The dashboard can also draft a fix for a problem that has no approved rule file, using a local AI model (Ollama, qwen2.5-coder:7b). Drafts are saved in remediations\drafts\ and are never applied automatically. The dashboard does not preview drafts yet, and a person approves a draft by reading and editing its file. When a rule file exists, the draft reuses its steps exactly, and the model only writes the wording.
+
 What it shows:
 
 - Summary cards (closed, open, error, compliance percent), a compliance trend across scan history, and findings by severity.
@@ -154,5 +156,5 @@ The screenshots in screenshots\ show the lab in three states.
 - Baseline, before any fix: 01 to 07 and 09. These show the SCP, budget, VPC route table, tagged resources, IMDSv1 setting, open security group rules, Session Manager OS settings, and the Inspector findings.
 - Remediation: 11 to 13. These show the dashboard running a dry-run with live output, IMDSv2 set to Required, and the security group with its open rules removed.
 - Results: 14 to 16. Screenshot 14 is a read-only Systems Manager Run Command that checks the OS settings after remediation. Screenshot 15 is the dashboard summary with 6 closed and 3 open. Screenshot 16 is the audit log.
-- Screenshot 10 (Security Hub) is pending: the AWS Foundational Security Best Practices standard needs to finish evaluating the instance.
+- Security Hub: the AWS Foundational Security Best Practices standard was enabled and its EC2 controls verified, and the findings view is available in the console.
 

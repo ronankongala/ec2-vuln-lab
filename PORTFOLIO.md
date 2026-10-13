@@ -10,6 +10,7 @@ An intentionally vulnerable AWS EC2 lab with rule-based, approval-gated remediat
 - Read-only scanner with nine cloud checks, JSON output, and history
 - Rule files for each automated fix, each with a dry-run, approval gate, rollback, and post-fix verification
 - Local dashboard with live output, filters, charts, and an audit log
+- AI-drafted fixes that are pinned to the approved steps where a rule exists; new drafts are checked against the allowed actions, lab-only targets, and known check names before they are saved
 - Guardrails: a service control policy blocking public IPs, internet gateways, and public snapshots
 
 ## Architecture
@@ -70,6 +71,7 @@ Terraform, AWS EC2, IAM, VPC, Systems Manager, Inspector, Security Hub, AWS Conf
 | After remediation | 6 closed, 3 open (manual rebuild or design change), 0 errors |
 | Compliance | 0% at baseline, 66.7% after remediation |
 | Rules applied | CLD-01, CLD-02, CLD-03, CLD-04, CLD-06, CLD-09 |
+| Unit tests | 52 passing, including the draft safety checks |
 
 The six applied rules cover IMDSv2 enforcement (CLD-01), removing the world-open SSH, MySQL/MariaDB, and Redis security group rules (CLD-02 to CLD-04), removing the instance role's `s3:*` policy (CLD-06), and enabling detailed monitoring (CLD-09). Each one was dry-run, approved, applied, and then verified by the same scanner check.
 
